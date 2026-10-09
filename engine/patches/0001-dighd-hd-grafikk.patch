@@ -92,7 +92,7 @@ index dcfe41db..bd1264b6 100644
  	// pointer to various parts of the costume resource
  	const AkosHeader *_akhd; // Header
 diff --git a/engines/scumm/base-costume.cpp b/engines/scumm/base-costume.cpp
-index d93b33e2..03d031cc 100644
+index d93b33e2..d5f4b18c 100644
 --- a/engines/scumm/base-costume.cpp
 +++ b/engines/scumm/base-costume.cpp
 @@ -24,6 +24,9 @@
@@ -110,7 +110,7 @@ index d93b33e2..03d031cc 100644
  	byte result = 0;
  
 +	if (_vm->_digHD && _akosRendering)
-+		_vm->_digHD->beginActor(a->_number, a->_costume, !drawToBackBuf);
++		_vm->_digHD->beginActor(a->_number, a->_costume, !drawToBackBuf, _zbuf);
 +
  	_out = vs;
  	if (drawToBackBuf)
@@ -195,10 +195,10 @@ index 21938706..3b478c6a 100644
  							hotspotX, hotspotY,
 diff --git a/engines/scumm/dighd.cpp b/engines/scumm/dighd.cpp
 new file mode 100644
-index 00000000..2b87485a
+index 00000000..25f65582
 --- /dev/null
 +++ b/engines/scumm/dighd.cpp
-@@ -0,0 +1,2776 @@
+@@ -0,0 +1,3260 @@
 +/* ScummVM - Graphic Adventure Engine
 + *
 + * ScummVM is the legal property of its developers, whose names
@@ -266,6 +266,35 @@ index 00000000..2b87485a
 +static inline uint32 packObject(int slot, int ox, int oy) { return kSrcObject | ((uint32)slot << 22) | ((uint32)oy << 11) | (uint32)ox; }
 +static inline uint32 packCel(int slot, int lx, int ly) { return kSrcCel | ((uint32)slot << 20) | ((uint32)ly << 10) | (uint32)lx; }
 +
++// The z-plane masks are one bit per pixel, 8 pixels per byte, in rows of the
++// screen's strips (Gdi::getMaskBuffer(), and the renderer: a set bit hides the
++// actor's pixel). zOff is Gdi::_imgBufOffs of the plane, rx the room column.
++static inline bool zHidden(const byte *maskBase, int maskSize, int zOff, int strips, int rx, int vy, int vsh) {
++	if (rx < 0 || vy < 0 || vy >= vsh)
++		return true;
++	const int m = zOff + vy * strips + (rx >> 3);
++	return m >= 0 && m < maskSize && (maskBase[m] & (0x80 >> (rx & 7)));
++}
++
++// A cel pixel shown in a colour far from the costume's true colour is a
++// special effect (a shadow drawn through the shadow palette, another palette
++// mapping) and keeps the original pixel. Same test as for the other cels in
++// compose().
++static bool wildColour(const byte *truec, const byte *shown) {
++	for (int k = 0; k < 3; k++) {
++		const int t = truec[k], v = shown[k];
++		if (t < 16) {
++			if (v > 48)
++				return true;
++		} else {
++			const int f = v * 256 / t;
++			if (f > 512 || (t > 64 && f < 48))
++				return true;
++		}
++	}
++	return false;
++}
++
 +static int envInt(const char *name, int def) {
 +	const char *v = getenv(name);
 +	return (v && *v) ? atoi(v) : def;
@@ -279,6 +308,8 @@ index 00000000..2b87485a
 +	hd.free();
 +	idx.free();
 +	transparent = -1;
++	soft = false;
++	padX = padY = 0;
 +	nearCycle.clear();
 +	nearCycleGen = 0;
 +}
@@ -329,6 +360,10 @@ index 00000000..2b87485a
 +	_testPalette = envInt("DIGHD_TEST_PALETTE", -1);
 +	if (const char *pos = getenv("DIGHD_TEST_POS"))
 +		sscanf(pos, "%d,%d", &_testPosX, &_testPosY);
++	_testClip = envInt("DIGHD_TEST_CLIP", 0);
++	_debugSoft = envInt("DIGHD_DEBUG_SOFT", 0) != 0;
++	if (const char *walk = getenv("DIGHD_TEST_WALK"))
++		sscanf(walk, "%d,%d", &_testWalkX, &_testWalkY);
 +	// DIGHD_TEST_OBJSTATE=884:2,886:1 puts these objects in these states after
 +	// the test jump; DIGHD_TEST_OBJSTATE=alle shows every state of every object
 +	// in the room, one after the other (see testObjectStates())
@@ -449,6 +484,13 @@ index 00000000..2b87485a
 +	_cycleArea.resize(_w * _h);
 +	_text.resize(_w * _h);
 +	_base.resize(_w * _h);
++	_coverSeq.resize(_w * _h);
++	_coverSlot.resize(_w * _h);
++	_softBase.resize(_w * _h);
++	for (uint i = 0; i < _coverSeq.size(); i++)
++		_coverSeq[i] = kCoverAll;
++	memset(_coverSlot.data(), 0, _coverSlot.size() * sizeof(uint16));
++	memset(_softBase.data(), 0, _softBase.size());
 +	memset(_shadow.data(), 0, _shadow.size());
 +	memset(_source.data(), 0, _source.size() * sizeof(uint32));
 +	memset(_cycleArea.data(), 0, _cycleArea.size());
@@ -525,7 +567,7 @@ index 00000000..2b87485a
 +	return new Common::MemoryReadStream(data, out, DisposeAfterUse::YES);
 +}
 +
-+bool DigHD::loadImage(const Common::Path &hdFile, const Common::Path &idxFile, int origW, int origH, Image &out) {
++bool DigHD::loadImage(const Common::Path &hdFile, const Common::Path &idxFile, int origW, int origH, Image &out, bool pad) {
 +	Common::FSNode hdNode(_modPath.join(hdFile));
 +	Common::FSNode idxNode(_modPath.join(idxFile));
 +	if (!hdNode.exists() || !idxNode.exists())
@@ -555,7 +597,19 @@ index 00000000..2b87485a
 +	if (!ok)
 +		return false;
 +	const Graphics::Surface *hs = hdDec.getSurface();
-+	if (hs->w != is->w * _scale || hs->h != is->h * _scale) {
++	int padX = 0, padY = 0;
++	if (pad) {
++		// The same margin on both sides, in whole original pixels: the image is
++		// (w + 2 * padX) x (h + 2 * padY) original pixels, times the scale
++		const int ow = hs->w / _scale, oh = hs->h / _scale;
++		padX = (ow - is->w) / 2;
++		padY = (oh - is->h) / 2;
++		if (hs->w % _scale || hs->h % _scale || padX < 0 || padY < 0 || ow != is->w + 2 * padX || oh != is->h + 2 * padY) {
++			warning("DigHD: %s is %dx%d, expected (%d + 2 * margin) x (%d + 2 * margin) original pixels times %d",
++			        hdFile.toString().c_str(), hs->w, hs->h, is->w, is->h, _scale);
++			return false;
++		}
++	} else if (hs->w != is->w * _scale || hs->h != is->h * _scale) {
 +		warning("DigHD: %s is %dx%d, expected %dx%d", hdFile.toString().c_str(), hs->w, hs->h, is->w * _scale, is->h * _scale);
 +		return false;
 +	}
@@ -566,6 +620,9 @@ index 00000000..2b87485a
 +	const Graphics::Palette &pal = idxDec.getPalette();
 +	memcpy(out.basePal, pal.data(), MIN<uint>(pal.size() * 3, sizeof(out.basePal)));
 +	out.transparent = transparent;
++	out.soft = pad;
++	out.padX = padX;
++	out.padY = padY;
 +
 +	const Graphics::Palette &hpal = hdDec.getPalette();
 +	Graphics::Surface *conv = hs->convertTo(_rgba, hpal.size() ? hpal.data() : nullptr, hpal.size());
@@ -582,6 +639,11 @@ index 00000000..2b87485a
 +	for (uint i = 0; i < _source.size(); i++)
 +		if (_source[i] & kSrcMask)
 +			_source[i] = kSrcFlat;
++	// Nothing is laid over these pixels until they are drawn again
++	for (uint i = 0; i < _coverSeq.size(); i++)
++		_coverSeq[i] = kCoverAll;
++	memset(_softBase.data(), 0, _softBase.size());
++	_pendingSoft.clear();
 +	_roomImage.free();
 +	_cycleTableBase = nullptr;  // a new image may get the same address
 +	for (auto &it : _objectImages) {
@@ -661,9 +723,12 @@ index 00000000..2b87485a
 +	if (_celImages.tryGetVal(key, img))
 +		return img;
 +	img = new Image();
++	// A soft cel (free outline with a margin, see drawSoftCels()) is used before
++	// a cel that is cut to the original's pixels
++	Common::Path soft(Common::String::format("costumes/costume%03d_%03d_hd.png", costume, cel));
 +	Common::Path hd(Common::String::format("costumes/costume%03d_%03d.png", costume, cel));
 +	Common::Path idx(Common::String::format("costumes/costume%03d_%03d_idx.png", costume, cel));
-+	if (!loadImage(hd, idx, width, height, *img)) {
++	if (!loadImage(soft, idx, width, height, *img, true) && !loadImage(hd, idx, width, height, *img)) {
 +		delete img;
 +		img = nullptr;
 +	}
@@ -671,10 +736,11 @@ index 00000000..2b87485a
 +	return img;
 +}
 +
-+void DigHD::beginActor(int actor, int costume, bool front) {
++void DigHD::beginActor(int actor, int costume, bool front, int zbuf) {
 +	_curActor = actor;
 +	_curCostume = costume;
 +	_curFront = front;
++	_curZbuf = zbuf;
 +	_passStarted = false;
 +}
 +
@@ -696,9 +762,13 @@ index 00000000..2b87485a
 +	}
 +	CelSlot *base = &_cels[_curActor * kCelSlotsPerActor];
 +	if (!_passStarted) {
-+		// New drawing pass for this actor: its earlier cels are being replaced
-+		for (int i = 0; i < kCelSlotsPerActor; i++)
++		// New drawing pass for this actor: its earlier cels are being replaced.
++		// Where soft cels were laid over the screen is built again.
++		for (int i = 0; i < kCelSlotsPerActor; i++) {
++			if (base[i].used && base[i].soft)
++				scheduleSoft(base[i]);
 +			base[i].used = base[i].missing = false;
++		}
 +		_curCelCount = 0;
 +		_passStarted = true;
 +	}
@@ -721,9 +791,19 @@ index 00000000..2b87485a
 +	c.mirror = mirror;
 +	c.raw = raw;
 +	c.seq = ++_seq;
++	// A soft cel drawn into the back buffer is part of the background: shown
++	// as original pixels, as other figures there
++	c.soft = img && img->soft && _curFront;
++	c.zbuf = _curZbuf;
++	c.live = 0;
++	c.gainPal = 0;
 +	// A cel drawn into the back buffer becomes part of the background
 +	if (_curFront)
 +		markCel(&c - _cels, left, top, xstart);
++	if (c.soft)
++		scheduleSoft(c);
++	if (c.soft && _debugSoft)
++		debug("DigHD: frame %u soft cel %d slot %d seq %u at %d,%d %dx%d", _frameNo, cel, (int)(&c - _cels), c.seq, c.rx, c.ry, c.rw, c.rh);
 +}
 +
 +void DigHD::CelLayer::clear() {
@@ -767,7 +847,16 @@ index 00000000..2b87485a
 +	if (!L)
 +		return;
 +	const VirtScreen &vs = _vm->_virtscr[kMainVirtScreen];
-+	const CelSlot &c = _cels[slot];
++	CelSlot &c = _cels[slot];
++	// For a soft cel: which colours the drawn pixels show, against the colours
++	// of the image's palette (see softGain())
++	const byte *backBuf = c.soft ? vs.backBuf : nullptr;
++	if (c.soft) {
++		c.hist.resize(256);
++		memset(c.hist.data(), 0, 256 * sizeof(uint32));
++		c.trueSum[0] = c.trueSum[1] = c.trueSum[2] = 0;
++		c.gainPal = 0;
++	}
 +	const size_t shift = xstart - (xstart & 7);
 +	const int x0 = MAX(left, 0), x1 = MIN(MIN(left + c.rw, L->pitch), left + 1024);
 +	const int y0 = MAX(top, 0), y1 = MIN(top + c.rh, (int)vs.h);
@@ -791,12 +880,19 @@ index 00000000..2b87485a
 +				const size_t off = rowOff + x;
 +				if (off >= L->size)
 +					break;
-+				if ((int)row[col[x - x0]] == c.image->transparent)
++				const byte code = row[col[x - x0]];
++				if ((int)code == c.image->transparent)
 +					continue;
 +				CelMark &m = marks[off];
 +				m.seq = c.seq;
 +				m.slot = slot;
 +				m.val = buf[off];
++				if (backBuf && buf[off] != backBuf[off] && !wildColour(c.image->basePal + code * 3, _pal + buf[off] * 3)) {
++					// Drawn here (not hidden by a z-plane), and not a shadow
++					c.hist[buf[off]]++;
++					for (int k = 0; k < 3; k++)
++						c.trueSum[k] += c.image->basePal[code * 3 + k];
++				}
 +			}
 +		}
 +	} else if (vs.backBuf) {
@@ -822,6 +918,267 @@ index 00000000..2b87485a
 +		}
 +	}
 +	L->any = true;
++}
++
++// ---------------------------------------------------------------- soft cels
++
++// A soft cel is a figure drawn anew in HD with an outline of its own and real
++// alpha (costumeCCC_NNN_hd.png). Its outline does not follow the original's
++// pixels, so it is not built pixel by pixel like the other cels. The picture
++// under the cel's own pixels is built from the background (the back buffer,
++// see blitVirtScreen()), and the HD image is laid over it with its alpha, after
++// the blocks and before the text:
++//
++//  - in the order the cels were drawn (seq), so later cels lie over earlier ones,
++//  - not where the z-plane mask of the actor hides it (things in front of it),
++//  - not where something other than a figure was drawn over the background
++//    (banners, menus, effects), nor where a cel without a soft image was drawn
++//    later,
++//  - only while its drawing is on the screen (live: pixels that show it).
++//
++// The image has a margin around the cel (padX and padY original pixels on each
++// side) for the soft edges and an outline that differs a little. It is placed by
++// the cel's rectangle, mirrored and scaled as the cel, and tinted by the ratio
++// between the colours the drawing shows and the colours of the image's palette.
++
++void DigHD::setCover(size_t i, uint32 seq, uint16 slot) {
++	const uint32 os = _coverSeq[i];
++	const uint16 ol = _coverSlot[i];
++	if (os == seq && ol == slot)
++		return;
++	if (os != kCoverNone && os != kCoverAll && ol < kMaxCelSlots) {
++		CelSlot &o = _cels[ol];
++		// The last pixel of a soft cel's drawing is gone: its edges go too
++		if (o.soft && o.seq == os && o.live > 0 && --o.live == 0 && o.used)
++			scheduleSoft(o);
++	}
++	if (seq != kCoverNone && seq != kCoverAll && slot < kMaxCelSlots) {
++		CelSlot &c = _cels[slot];
++		if (c.soft && c.seq == seq)
++			c.live++;
++	}
++	_coverSeq[i] = seq;
++	_coverSlot[i] = slot;
++}
++
++bool DigHD::softRect(const CelSlot &c, Common::Rect &r) const {
++	// The screen area the image can cover, in original pixels
++	if (!c.image || !c.image->soft || c.rw <= 0 || c.rh <= 0 || !_w || !_h)
++		return false;
++	const VirtScreen &vs = _vm->_virtscr[kMainVirtScreen];
++	const int iw = c.image->idx.w, ih = c.image->idx.h;
++	// The margin in room pixels at the cel's size, and one more for the filter
++	const int px = (c.image->padX * c.rw + iw - 1) / iw + 1;
++	const int py = (c.image->padY * c.rh + ih - 1) / ih + 1;
++	const int left = c.rx - px - vs.xstart;
++	const int top = c.ry - py - _vm->_screenTop + vs.topline;
++	r = Common::Rect(left, top, left + c.rw + 2 * px, top + c.rh + 2 * py);
++	r.clip(Common::Rect(0, 0, _w, _h));
++	return !r.isEmpty();
++}
++
++void DigHD::scheduleSoft(const CelSlot &c) {
++	Common::Rect r;
++	if (!softRect(c, r))
++		return;
++	for (uint i = 0; i < _pendingSoft.size(); i++) {
++		if (_pendingSoft[i].intersects(r)) {
++			_pendingSoft[i].extend(r);
++			return;
++		}
++	}
++	if (_pendingSoft.size() >= 32) {
++		// Many small areas: one around them all
++		_pendingSoft[0].extend(r);
++		return;
++	}
++	_pendingSoft.push_back(r);
++}
++
++void DigHD::flushSoft() {
++	if (_pendingSoft.empty() || _outBuf.empty())
++		return;
++	const Common::Array<Common::Rect> rects = _pendingSoft;
++	_pendingSoft.clear();
++	for (uint i = 0; i < rects.size(); i++) {
++		if (_debugSoft) {
++			int live = 0;
++			for (int k = 0; k < kMaxCelSlots; k++)
++				if (_cels[k].used && _cels[k].soft && _cels[k].live)
++					live++;
++			debug("DigHD: frame %u flush soft %d,%d %dx%d, %d live soft cels", _frameNo, rects[i].left, rects[i].top, rects[i].width(), rects[i].height(), live);
++		}
++		writeRect(rects[i].left, rects[i].top, rects[i].width(), rects[i].height());
++	}
++}
++
++void DigHD::softGain(CelSlot &c) {
++	if (c.gainPal == _palVersion)
++		return;
++	c.gainPal = _palVersion;
++	c.gain[0] = c.gain[1] = c.gain[2] = 256;
++	uint64 shown[3] = { 0, 0, 0 };
++	uint32 count = 0;
++	for (uint v = 0; v < c.hist.size(); v++) {
++		if (!c.hist[v])
++			continue;
++		count += c.hist[v];
++		for (int k = 0; k < 3; k++)
++			shown[k] += (uint64)c.hist[v] * _pal[v * 3 + k];
++	}
++	if (!count)
++		return;
++	// Close to the image's colours is normal light: the image as it is
++	bool plain = true;
++	for (int k = 0; k < 3; k++)
++		if (ABS((int)(shown[k] / count) - (int)(c.trueSum[k] / count)) > 16)
++			plain = false;
++	if (plain)
++		return;
++	for (int k = 0; k < 3; k++)
++		if (c.trueSum[k] >= count * 8)
++			c.gain[k] = CLIP<int>((int)(shown[k] * 256 / c.trueSum[k]), 0, 512);
++	if (_verify)
++		debug("DigHD: soft cel %d of costume %d: %u px, shown %u,%u,%u, image %u,%u,%u, gain %d,%d,%d",
++		      c.cel, c.costume, count, (uint32)(shown[0] / count), (uint32)(shown[1] / count), (uint32)(shown[2] / count),
++		      c.trueSum[0] / count, c.trueSum[1] / count, c.trueSum[2] / count, c.gain[0], c.gain[1], c.gain[2]);
++}
++
++void DigHD::drawSoftCels(int x, int y, int width, int height) {
++	// The soft cels on the screen now, in the order they were drawn
++	int order[kMaxCelSlots];
++	int count = 0;
++	for (int i = 0; i < kMaxCelSlots; i++) {
++		const CelSlot &c = _cels[i];
++		if (c.used && c.soft && c.live && c.image && c.image->soft)
++			order[count++] = i;
++	}
++	if (!count)
++		return;
++	for (int i = 1; i < count; i++) {
++		const int v = order[i];
++		int j = i - 1;
++		while (j >= 0 && _cels[order[j]].seq > _cels[v].seq) {
++			order[j + 1] = order[j];
++			j--;
++		}
++		order[j + 1] = v;
++	}
++
++	const VirtScreen &vs = _vm->_virtscr[kMainVirtScreen];
++	const int n = _scale, bpp = _fmt.bytesPerPixel, outPitch = width * n * bpp;
++	const int vyOff = _vm->_screenTop - vs.topline;  // virtual screen row = screen row + vyOff
++	// The z-plane masks, laid out as Gdi::getMaskBuffer() reads them
++	const byte *maskBase = _vm->getResourceAddress(rtBuffer, 9);
++	const int maskSize = maskBase ? _vm->getResourceSize(rtBuffer, 9) : 0;
++	const Common::Rect area(x, y, x + width, y + height);
++	// The images are RGBA32, in memory order (Image::hd)
++	const int rs = _rgba.rShift, gs = _rgba.gShift, bs = _rgba.bShift, as = _rgba.aShift;
++
++	for (int k = 0; k < count; k++) {
++		CelSlot &c = _cels[order[k]];
++		Common::Rect r;
++		if (!softRect(c, r))
++			continue;
++		r.clip(area);
++		if (r.isEmpty())
++			continue;
++		softGain(c);
++		const Image &im = *c.image;
++		const int iw = im.idx.w, ih = im.idx.h, W = im.hd.w, H = im.hd.h;
++		const bool scaled = c.rw != iw || c.rh != ih;
++		const float fx = (float)iw / c.rw, fy = (float)ih / c.rh;
++		const int zbuf = (maskBase && _vm->_gdi && c.zbuf > 0 && c.zbuf < _vm->_gdi->_numZBuffer) ? c.zbuf : 0;
++		const int zOff = zbuf ? _vm->_gdi->_imgBufOffs[zbuf] : 0;
++		const int strips = _vm->_gdi ? _vm->_gdi->_numStrips : 0;
++
++		for (int sy = r.top; sy < r.bottom; sy++) {
++			const int vy = sy + vyOff;
++			for (int sx = r.left; sx < r.right; sx++) {
++				const size_t i = (size_t)sy * _w + sx;
++				// Something other than a figure, or a cel without soft image drawn
++				// later, lies over the cel here. Under a soft cel's own pixels the
++				// background is shown, and every soft cel is laid over it in turn.
++				const uint32 cov = _coverSeq[i];
++				if (cov == kCoverAll || (cov != kCoverNone && !_softBase[i] && cov > c.seq))
++					continue;
++				const int rx = vs.xstart + sx;
++				// Hidden by the z-plane as the renderer hides the actor's pixels
++				if (zbuf && zHidden(maskBase, maskSize, zOff, strips, rx, vy, vs.h))
++					continue;
++				byte *out = _outBuf.data() + ((sy - y) * n) * outPitch + ((sx - x) * n) * bpp;
++				bool drew = false;
++				for (int dy = 0; dy < n; dy++) {
++					byte *o = out + dy * outPitch;
++					const int hy = (vy - c.ry) * n + dy;  // HD row from the cel's top
++					for (int dx = 0; dx < n; dx++, o += bpp) {
++						const int hx = (rx - c.rx) * n + dx;  // HD column from the cel's left
++						// Premultiplied colour and alpha of the image here, 0..255 * 255
++						uint32 pr = 0, pg = 0, pb = 0, pa = 0;
++						if (!scaled) {
++							int u = c.mirror ? iw * n - 1 - hx : hx;
++							u += im.padX * n;
++							const int v = hy + im.padY * n;
++							if (u < 0 || v < 0 || u >= W || v >= H)
++								continue;
++							const uint32 p = *((const uint32 *)im.hd.getBasePtr(u, v));
++							const uint32 a = (p >> as) & 0xFF;
++							if (!a)
++								continue;
++							pr = ((p >> rs) & 0xFF) * a;
++							pg = ((p >> gs) & 0xFF) * a;
++							pb = ((p >> bs) & 0xFF) * a;
++							pa = a * 255;
++						} else {
++							// The cel is drawn smaller or larger: bilinear filter
++							float u = (hx + 0.5f) * fx - 0.5f;
++							if (c.mirror)
++								u = iw * n - 1 - u;
++							u += im.padX * n;
++							const float v = (hy + 0.5f) * fy - 0.5f + im.padY * n;
++							const int u0 = (int)floorf(u), v0 = (int)floorf(v);
++							const float au = u - u0, av = v - v0;
++							float acc[4] = { 0, 0, 0, 0 };
++							for (int t = 0; t < 4; t++) {
++								const int uu = u0 + (t & 1), vv = v0 + (t >> 1);
++								if (uu < 0 || vv < 0 || uu >= W || vv >= H)
++									continue;
++								const float w = ((t & 1) ? au : 1 - au) * ((t >> 1) ? av : 1 - av);
++								const uint32 p = *((const uint32 *)im.hd.getBasePtr(uu, vv));
++								const float a = ((p >> as) & 0xFF) * w;
++								acc[0] += ((p >> rs) & 0xFF) * a;
++								acc[1] += ((p >> gs) & 0xFF) * a;
++								acc[2] += ((p >> bs) & 0xFF) * a;
++								acc[3] += a;
++							}
++							if (acc[3] < 0.5f)
++								continue;
++							pr = (uint32)acc[0];
++							pg = (uint32)acc[1];
++							pb = (uint32)acc[2];
++							pa = (uint32)(acc[3] * 255);
++						}
++						// Tint (shadow, light, fades), at most full colour
++						pr = MIN<uint32>((pr * c.gain[0]) >> 8, pa);
++						pg = MIN<uint32>((pg * c.gain[1]) >> 8, pa);
++						pb = MIN<uint32>((pb * c.gain[2]) >> 8, pa);
++						const uint32 keep = 255 * 255 - MIN<uint32>(pa, 255 * 255);
++						const uint32 dst = bpp == 4 ? READ_UINT32(o) : READ_UINT16(o);
++						byte dr, dg, db;
++						_fmt.colorToRGB(dst, dr, dg, db);
++						const uint32 col = _fmt.RGBToColor(
++							(byte)MIN<uint32>(255, (pr * 255 + dr * keep + 32512) / 65025),
++							(byte)MIN<uint32>(255, (pg * 255 + dg * keep + 32512) / 65025),
++							(byte)MIN<uint32>(255, (pb * 255 + db * keep + 32512) / 65025));
++						if (bpp == 4) WRITE_UINT32(o, col); else WRITE_UINT16(o, col);
++						drew = true;
++					}
++				}
++				if (drew)
++					_statSoft++;
++			}
++		}
++	}
 +}
 +
 +// ---------------------------------------------------------------- blits
@@ -870,8 +1227,12 @@ index 00000000..2b87485a
 +					text = textAt(_textMain, off, f[c], idx);
 +			}
 +			uint32 source = kSrcFlat;
++			uint32 coverSeq = kCoverAll;  // something other than a figure, until known
++			uint16 coverSlot = 0;
++			bool softBase = false;
++			byte baseIdx = idx;
 +
-+					if (b && b[c] != idx) {
++			if (b && b[c] != idx) {
 +				// Something was drawn over the background. It is a figure if a cel
 +				// drew this pixel in its last drawing and the value is still the
 +				// cel's (under a glyph: the value under the glyph).
@@ -881,7 +1242,26 @@ index 00000000..2b87485a
 +					if (m.seq && m.val == idx && _cels[m.slot].seq == m.seq) {
 +						const CelSlot &cs = _cels[m.slot];
 +						const int lx = vs->xstart + x + c - cs.rx, ly = ry - cs.ry;
-+						if (cs.used) {
++						coverSeq = m.seq;
++						coverSlot = m.slot;
++						if (cs.used && cs.soft) {
++							// A soft cel is laid over the HD picture of the background
++							// under it (drawSoftCels()). Its shadows and effects stay
++							// original pixels, under the cel.
++							bool kept = true;
++							if (lx >= 0 && ly >= 0 && lx < cs.rw && ly < cs.rh) {
++								const Graphics::Surface &ci = cs.image->idx;
++								int cx = lx * ci.w / cs.rw;
++								if (cs.mirror)
++									cx = ci.w - 1 - cx;
++								const byte code = *((const byte *)ci.getBasePtr(cx, ly * ci.h / cs.rh));
++								kept = (cs.raw && code != idx) || wildColour(cs.image->basePal + code * 3, _pal + idx * 3);
++							}
++							if (!kept) {
++								softBase = true;
++								baseIdx = b[c];
++							}
++						} else if (cs.used && !cs.image->soft) {
 +							if (lx >= 0 && ly >= 0 && lx < cs.rw && ly < cs.rh && lx < 1024 && ly < 1024)
 +								source = packCel(m.slot, lx, ly);
 +						} else if (cs.missing) {
@@ -889,10 +1269,13 @@ index 00000000..2b87485a
 +						}
 +					}
 +				}
-+			} else if (b && b[c] == idx) {
++			} else if (b) {
++				coverSeq = kCoverNone;
++			}
++			if (b && (b[c] == idx || softBase)) {
 +				const int rx = vs->xstart + x + c;
 +				if (haveRoom && rx >= 0 && rx < roomW && ry >= 0 && ry < roomH &&
-+				    *((const byte *)_roomImage.idx.getBasePtr(rx, ry)) == idx) {
++				    *((const byte *)_roomImage.idx.getBasePtr(rx, ry)) == baseIdx) {
 +					source = packRoom(rx, ry);
 +				} else {
 +					// Most recently drawn object image that matches this pixel.
@@ -907,7 +1290,7 @@ index 00000000..2b87485a
 +						if (ox < 0 || oy < 0 || ox >= d.image->idx.w || oy >= d.image->idx.h)
 +							continue;
 +						const byte oi = *((const byte *)d.image->idx.getBasePtr(ox, oy));
-+						if (oi == idx && (int)oi != d.image->transparent) {
++						if (oi == baseIdx && (int)oi != d.image->transparent) {
 +							source = packObject(i, ox, oy);
 +							bestSeq = d.seq;
 +						}
@@ -915,9 +1298,11 @@ index 00000000..2b87485a
 +				}
 +			}
 +			_shadow[sy * _w + sx] = f[c];
-+			_base[sy * _w + sx] = idx;
++			_base[sy * _w + sx] = baseIdx;
++			_softBase[sy * _w + sx] = softBase;
 +			_text[sy * _w + sx] = text;
 +			_source[sy * _w + sx] = source;
++			setCover(sy * _w + sx, coverSeq, coverSlot);
 +		}
 +	}
 +
@@ -936,6 +1321,8 @@ index 00000000..2b87485a
 +			_shadow[sy * _w + sx] = _base[sy * _w + sx] = src[r * pitch + c];
 +			_source[sy * _w + sx] = kSrcFlat;
 +			_text[sy * _w + sx] = 0;
++			_softBase[sy * _w + sx] = 0;
++			setCover(sy * _w + sx, kCoverAll, 0);
 +		}
 +	}
 +	writeRect(x, y, width, height);
@@ -1030,6 +1417,8 @@ index 00000000..2b87485a
 +			_base[r * _w + c] = idx;
 +			_text[r * _w + c] = glyph;
 +			_source[r * _w + c] = (!glyph && text && text[r * pitch + c]) ? kSrcFlat : picture;
++			_softBase[r * _w + c] = 0;
++			setCover(r * _w + c, kCoverAll, 0);
 +		}
 +
 +	// The film picture replaces any text drawn into the game screen (banners).
@@ -1978,7 +2367,8 @@ index 00000000..2b87485a
 +			// the glyph is drawn over it below. Classic mode shows the original.
 +			const bool glyph = !flatOnly && _text[sy * _w + sx];
 +			anyText |= glyph;
-+			const byte idx = glyph ? _base[sy * _w + sx] : _shadow[sy * _w + sx];
++			// Under a soft cel the picture is built for the background under it
++			const byte idx = (glyph || (!flatOnly && _softBase[sy * _w + sx])) ? _base[sy * _w + sx] : _shadow[sy * _w + sx];
 +			const uint32 src = _source[sy * _w + sx];
 +			const uint32 kind = src & kSrcMask;
 +			byte *out = _outBuf.data() + (r * n) * outPitch + (c * n) * bpp;
@@ -2023,7 +2413,7 @@ index 00000000..2b87485a
 +
 +			if (kind == kSrcCel) {
 +				const CelSlot &cs = _cels[(src >> 20) & 0x3FF];
-+				if (!cs.used || !cs.image) {
++				if (!cs.used || !cs.image || cs.image->soft) {
 +					kindFlat(out, outPitch, idx, showMissing);
 +					continue;
 +				}
@@ -2135,6 +2525,10 @@ index 00000000..2b87485a
 +		}
 +	}
 +
++	// Soft cels over the blocks built above, under the text
++	if (!flatOnly && !_vm->isSmushActive())
++		drawSoftCels(x, y, width, height);
++
 +	// HD glyphs over the blocks built above
 +	if (anyText) {
 +		for (int r = 0; r < height; r++) {
@@ -2200,20 +2594,37 @@ index 00000000..2b87485a
 +		for (int y = y0; y < y1; y++) {
 +			const byte *sh = _shadow.data() + y * _w;
 +			const byte *ca = _cycleArea.data() + y * _w;
++			// Under a soft cel, the background's colour is shown (_base)
++			const byte *sb = _softBase.data() + y * _w;
++			const byte *bs = _base.data() + y * _w;
 +			int x = 0;
-+			while (x < left && !changed[sh[x]] && !ca[x])
++			while (x < left && !changed[sh[x]] && !ca[x] && !(sb[x] && changed[bs[x]]))
 +				x++;
 +			if (x == _w)
 +				continue;
 +			left = MIN(left, x);
 +			x = _w - 1;
-+			while (x > right && !changed[sh[x]] && !ca[x])
++			while (x > right && !changed[sh[x]] && !ca[x] && !(sb[x] && changed[bs[x]]))
 +				x--;
 +			right = MAX(right, x);
 +		}
 +		if (right >= left)
 +			writeRect(left, y0, right - left + 1, y1 - y0);
 +	}
++	// Soft cels are tinted by the colours their drawing shows (softGain()),
++	// and their soft edges reach outside the pixels counted above
++	for (int i = 0; i < kMaxCelSlots; i++) {
++		const CelSlot &c = _cels[i];
++		if (!c.used || !c.soft || !c.live)
++			continue;
++		bool any = false;
++		for (int v = 0; v < 256 && !any && v < (int)c.hist.size(); v++)
++			any = c.hist[v] && changed[v];
++		if (any)
++			scheduleSoft(c);
++	}
++	// Built in beforeUpdateScreen(): the engine may change the palette between
++	// drawing the actors and sending them to the screen
 +}
 +
 +void DigHD::moveScreen(int dx, int dy, int height) {
@@ -2227,6 +2638,8 @@ index 00000000..2b87485a
 +				_shadow[y * _w + x] = _base[y * _w + x] = sh[fy * _w + fx];
 +				_source[y * _w + x] = kSrcFlat;
 +				_text[y * _w + x] = 0;
++				_softBase[y * _w + x] = 0;
++				setCover(y * _w + x, kCoverAll, 0);
 +			}
 +		}
 +	}
@@ -2254,6 +2667,8 @@ index 00000000..2b87485a
 +
 +void DigHD::beforeUpdateScreen() {
 +	_frameNo++;
++	// Soft cels that were drawn, moved or removed since the last frame
++	flushSoft();
 +	if (_cursorPending)
 +		_vm->updateCursor();
 +
@@ -2297,7 +2712,7 @@ index 00000000..2b87485a
 +			Actor *a = _vm->derefActor(_testActor, "DigHD test costume");
 +			if (since == 0) {
 +				a->_ignoreBoxes = true;
-+				a->_forceClip = 0;
++				a->_forceClip = _testClip;
 +				a->setElevation(0);
 +				a->setActorCostume(_testCostume);
 +				const int x = _testPosX >= 0 ? _testPosX : _vm->camera._cur.x;
@@ -2323,7 +2738,7 @@ index 00000000..2b87485a
 +							_testAnims.push_back(anim);
 +				}
 +			}
-+			if (!_testAnims.empty()) {
++			if (!_testAnims.empty() && _testWalkX < 0) {
 +				const int anim = _testAnims[(since / _testChoreEvery) % _testAnims.size()];
 +				const int frame = anim / _testDirs, dir = anim % _testDirs;
 +				a->setFacing(_testDirs == 8 ? dir * 45 : oldDirToNewDir(dir));
@@ -2331,6 +2746,20 @@ index 00000000..2b87485a
 +				debug("DigHD: test, actor %d animation %d (chore %d, direction %d) at frame %u",
 +				      _testActor, anim, frame, dir, _frameNo);
 +			}
++		}
++	}
++
++	// DIGHD_TEST_WALK: the test actor walks to the point and back to where it
++	// was put, again and again (straight, without the walk boxes)
++	if (_testCostume > 0 && _testWalkX >= 0 && _testDone && _testActor > 0 && _testActor < _vm->_numActors &&
++	    !_vm->isSmushActive() && (int)_frameNo > _testAt + 30) {
++		Actor *a = _vm->derefActor(_testActor, "DigHD test walk");
++		if (a->isInCurrentRoom() && !a->_moving) {
++			const int x = _testWalkBack ? (_testPosX >= 0 ? _testPosX : _vm->camera._cur.x) : _testWalkX;
++			const int y = _testWalkBack ? (_testPosY >= 0 ? _testPosY : 180) : _testWalkY;
++			_testWalkBack = !_testWalkBack;
++			a->startWalkActor(x, y, -1);
++			debug("DigHD: test, actor %d walks to %d,%d at frame %u", _testActor, x, y, _frameNo);
 +		}
 +	}
 +
@@ -2722,6 +3151,8 @@ index 00000000..2b87485a
 +		s += Common::String::format(", tinted sprite px %u", _statCelTint);  // part of HD sprite px
 +	if (_statCelKept)
 +		s += Common::String::format(", figure px kept original %u", _statCelKept);  // part of original px
++	if (_statSoft)
++		s += Common::String::format(", soft figure px %u", _statSoft);  // laid over the pixels counted above
 +	if (_showMissing)
 +		s += Common::String::format(", yellow px %u", _statMissing);
 +	if (_classic)
@@ -2747,8 +3178,60 @@ index 00000000..2b87485a
 +						stale += memcmp(a + i, b + i, bpp) != 0;
 +				}
 +				debug("DigHD: verify frame %u: %u screen pixels differ from the whole screen built again", _frameNo, stale);
++				if (stale) {
++					// What the screen showed, next to the dump (the screen built again)
++					Common::FSNode snode(_dumpDir.join(Common::String::format("frame_%06u_screen.png", _frameNo)));
++					if (Common::WriteStream *sws = snode.createWriteStream()) {
++						::Image::writePNG(*sws, *scr);
++						sws->finalize();
++						delete sws;
++					}
++				}
 +			}
 +			g_system->unlockScreen();
++		}
++
++		// Soft cels: are they hidden by the z-plane exactly where the renderer
++		// left out the actor's pixels? Counted over the pixels of each cel's
++		// rectangle where its image has a colour and nothing else lies on top.
++		{
++			const VirtScreen &vs = _vm->_virtscr[kMainVirtScreen];
++			const byte *maskBase = _vm->getResourceAddress(rtBuffer, 9);
++			const int maskSize = maskBase ? _vm->getResourceSize(rtBuffer, 9) : 0;
++			const int vyOff = _vm->_screenTop - vs.topline;
++			uint32 checked = 0, wrong = 0, behind = 0;
++			for (int k = 0; k < kMaxCelSlots && maskBase && _vm->_gdi; k++) {
++				const CelSlot &c = _cels[k];
++				if (!c.used || !c.soft || !c.live || c.zbuf <= 0 || c.zbuf >= _vm->_gdi->_numZBuffer)
++					continue;
++				const Image &im = *c.image;
++				for (int ly = 0; ly < c.rh; ly++) {
++					const int sy = c.ry + ly - vyOff;
++					if (sy < 0 || sy >= _h)
++						continue;
++					for (int lx = 0; lx < c.rw; lx++) {
++						const int sx = c.rx + lx - vs.xstart;
++						if (sx < 0 || sx >= _w)
++							continue;
++						int cx = lx * im.idx.w / c.rw;
++						if (c.mirror)
++							cx = im.idx.w - 1 - cx;
++						if (*((const byte *)im.idx.getBasePtr(cx, ly * im.idx.h / c.rh)) == im.transparent)
++							continue;
++						const size_t i = (size_t)sy * _w + sx;
++						const bool mine = _coverSeq[i] == c.seq && _coverSlot[i] == k;
++						if (!mine && _coverSeq[i] != kCoverNone)
++							continue;  // another figure or a banner on top
++						checked++;
++						const bool hidden = zHidden(maskBase, maskSize, _vm->_gdi->_imgBufOffs[c.zbuf], _vm->_gdi->_numStrips,
++						                            c.rx + lx, c.ry + ly, vs.h);
++						wrong += hidden == mine;
++						behind += hidden;
++					}
++				}
++			}
++			if (checked)
++				debug("DigHD: verify frame %u: soft cels, %u of %u pixels disagree with the z-plane (%u behind it)", _frameNo, wrong, checked, behind);
 +		}
 +
 +		// Compare the HD frame with a plain scaled-up frame. With a mod made with
@@ -2835,7 +3318,7 @@ index 00000000..2b87485a
 +	// The counts of this pass alone are the whole picture in the dump (the counts
 +	// in the line below are summed over everything built since the last dump).
 +	const uint32 room0 = _statRoom, object0 = _statObject, cel0 = _statCel, flat0 = _statFlat;
-+	const uint32 text0 = _statText, cycle0 = _statCycle;
++	const uint32 text0 = _statText, cycle0 = _statCycle, soft0 = _statSoft;
 +	compose(0, 0, _w, _h);
 +	Common::FSNode node(_dumpDir.join(fname));
 +	Common::WriteStream *ws = node.createWriteStream();
@@ -2868,10 +3351,11 @@ index 00000000..2b87485a
 +		// camera moved, before the screen was drawn; a script may already have
 +		// moved the camera again)
 +		debug("DigHD: whole screen frame %u (room %d, screen at %d,%d): HD room px %u, HD object px %u, HD sprite px %u, "
-+		      "original px %u (background without HD %u, figure without HD %u), HD text px %u, cycled HD px %u",
++		      "original px %u (background without HD %u, figure without HD %u), HD text px %u, cycled HD px %u, "
++		      "soft figure px %u",
 +		      _frameNo, (int)_vm->_currentRoom, vs->xstart, _vm->_screenTop,
 +		      _statRoom - room0, _statObject - object0, _statCel - cel0, _statFlat - flat0,
-+		      bgMissing, figMissing, _statText - text0, _statCycle - cycle0);
++		      bgMissing, figMissing, _statText - text0, _statCycle - cycle0, _statSoft - soft0);
 +		logTestObjects();  // DIGHD_TEST_OBJSTATE
 +	}
 +	if (film) {
@@ -2971,16 +3455,16 @@ index 00000000..2b87485a
 +		}
 +	}
 +	_statRoom = _statObject = _statCel = _statSan = _statFlat = _statMissing = _statCycle = _statText = 0;
-+	_statCelTint = _statCelKept = 0;
++	_statCelTint = _statCelKept = _statSoft = 0;
 +}
 +
 +} // End of namespace Scumm
 diff --git a/engines/scumm/dighd.h b/engines/scumm/dighd.h
 new file mode 100644
-index 00000000..dbaf9280
+index 00000000..2e8e2677
 --- /dev/null
 +++ b/engines/scumm/dighd.h
-@@ -0,0 +1,425 @@
+@@ -0,0 +1,465 @@
 +/* ScummVM - Graphic Adventure Engine
 + *
 + * ScummVM is the legal property of its developers, whose names
@@ -3016,6 +3500,9 @@ index 00000000..dbaf9280
 + *  - pixels of a costume cel come from mods/<name>/costumes/costumeCCC_NNN.png,
 + *    as long as the pixel still holds the value the cel drew and nothing else
 + *    (a banner, a menu, a box) has been drawn there since,
++ *  - a costume cel with a free outline (costumeCCC_NNN_hd.png, with real
++ *    alpha and a margin around the cel) is laid over the HD picture with soft
++ *    edges, see drawSoftCels(),
 + *  - film frames come from mods/<name>/san/<FILE>/NNNNN.png, except the
 + *    pixels of text (subtitles) that SmushPlayer draws over the film,
 + *  - text (dialog, banners, menus, subtitles) is drawn with HD glyphs made
@@ -3042,6 +3529,7 @@ index 00000000..dbaf9280
 +#include "common/hashmap.h"
 +#include "common/keyboard.h"
 +#include "common/path.h"
++#include "common/rect.h"
 +#include "common/str.h"
 +#include "graphics/pixelformat.h"
 +#include "graphics/surface.h"
@@ -3128,8 +3616,11 @@ index 00000000..dbaf9280
 +	void updateCursor(const byte *cursor, int width, int height, int hotspotX, int hotspotY, int transColor);
 +	void noteObject(int obj, int state, int x, int y, int width, int height);
 +
-+	/** An actor is about to be drawn (costume renderer), into the front buffer or the back buffer. */
-+	void beginActor(int actor, int costume, bool front);
++	/**
++	 * An actor is about to be drawn (costume renderer), into the front buffer or
++	 * the back buffer. zbuf: the z-plane mask the renderer uses (0 = none).
++	 */
++	void beginActor(int actor, int costume, bool front, int zbuf);
 +	/**
 +	 * A costume cel was painted. Coordinates are in costume renderer space.
 +	 * raw: the cel's codes were drawn as palette indices, without the actor
@@ -3164,6 +3655,10 @@ index 00000000..dbaf9280
 +		Graphics::Surface idx;  // CLUT8, original size
 +		byte basePal[768];
 +		int transparent = -1;
++		// A soft cel (costumeCCC_NNN_hd.png): the HD image has a margin of padX and
++		// padY original pixels on each side, and its own alpha (see drawSoftCels())
++		bool soft = false;
++		int padX = 0, padY = 0;
 +		Common::Array<byte> nearCycle;  // per original pixel: cycles or touches a cycled pixel
 +		uint32 nearCycleGen = 0;        // _cycledGen the mask was made for
 +		bool valid() const { return hd.getPixels() && idx.getPixels(); }
@@ -3179,6 +3674,14 @@ index 00000000..dbaf9280
 +		bool missing = false;  // drawn, but there is no HD image for this cel
 +		bool raw = false;      // codes drawn as palette indices (see noteCel())
 +		uint32 seq = 0;
++		// Soft cels (see drawSoftCels())
++		bool soft = false;     // the image is soft and the cel was drawn on the screen
++		int zbuf = 0;          // z-plane mask of the actor
++		uint32 live = 0;       // screen pixels that show this drawing of the cel now
++		uint32 trueSum[3] = { 0, 0, 0 };  // colours of the image's palette over the drawn pixels
++		Common::Array<uint32> hist;       // per palette index: drawn pixels that show it
++		uint32 gainPal = 0;               // _palVersion of gain
++		int gain[3] = { 256, 256, 256 };  // shown colour / image colour, 256 = 1
 +	};
 +	enum { kCelSlotsPerActor = 32, kMaxCelSlots = 1024 };
 +
@@ -3208,11 +3711,27 @@ index 00000000..dbaf9280
 +		uint32 seq;
 +	};
 +
-+	bool loadImage(const Common::Path &hdFile, const Common::Path &idxFile, int origW, int origH, Image &out);
++	bool loadImage(const Common::Path &hdFile, const Common::Path &idxFile, int origW, int origH, Image &out, bool pad = false);
 +	void loadRoom(int room);
 +	void clearRoom();
 +	CelLayer *celLayer(bool create);
 +	void markCel(int slot, int left, int top, int xstart);
++
++	// Soft cels. Per screen pixel, what is on top of the background: nothing
++	// (kCoverNone), something that is not a figure (kCoverAll), or the drawing
++	// of a cel (its seq, and the slot in _coverSlot). A soft cel's own pixels
++	// show the background under it (_softBase), and the cel is laid over it.
++	enum : uint32 { kCoverNone = 0, kCoverAll = 0xFFFFFFFFu };
++	void setCover(size_t i, uint32 seq, uint16 slot);
++	bool softRect(const CelSlot &c, Common::Rect &r) const;
++	void scheduleSoft(const CelSlot &c);
++	void flushSoft();
++	void softGain(CelSlot &c);
++	void drawSoftCels(int x, int y, int width, int height);
++	Common::Array<uint32> _coverSeq;
++	Common::Array<uint16> _coverSlot;
++	Common::Array<byte> _softBase;
++	Common::Array<Common::Rect> _pendingSoft;  // screen areas to build again before the screen is shown
 +	void glyphOverCels(const GlyphDraw &g);
 +	void compose(int x, int y, int width, int height);
 +	void kindFlat(byte *out, int outPitch, byte idx, bool missing);
@@ -3315,7 +3834,7 @@ index 00000000..dbaf9280
 +	Common::HashMap<uint32, bool> _celModesSeen;  // DIGHD_VERIFY: costume, room, palette and raw logged once
 +	CelSlot _cels[kMaxCelSlots];
 +	CelLayer _celMain;
-+	int _curActor = -1, _curCostume = -1, _curCelCount = 0;
++	int _curActor = -1, _curCostume = -1, _curCelCount = 0, _curZbuf = 0;
 +	bool _passStarted = false;
 +	bool _curFront = true;  // the actor is drawn into the front buffer (the screen)
 +	uint32 _seq = 0;
@@ -3368,6 +3887,10 @@ index 00000000..dbaf9280
 +	Common::Point _testCamPos;  // where DIGHD_TEST_CAMX/CAMY put the camera (clamped to the room)
 +	int _testCostume = -1, _testActor = 29, _testChoreEvery = 60, _testPosX = -1, _testPosY = -1, _testPalette = -1;  // DIGHD_TEST_COSTUME
 +	Common::Array<int> _testAnims;  // animations of the test costume (AKCH entries in use)
++	int _testWalkX = -1, _testWalkY = -1;  // DIGHD_TEST_WALK: the test actor walks there and back
++	bool _testWalkBack = false;
++	int _testClip = 0;  // DIGHD_TEST_CLIP: z-plane of the test actor (_forceClip; 100 = by walk box)
++	bool _debugSoft = false;  // DIGHD_DEBUG_SOFT: log soft cels and the areas built again for them
 +	int _testDirs = 4;
 +
 +	// DIGHD_TEST_OBJSTATE: objects put in a state after the test jump, as the
@@ -3400,6 +3923,7 @@ index 00000000..dbaf9280
 +	bool _skipVideo = false, _testDone = false, _verify = false, _forceFlat = false, _dumpFlat = false;
 +	uint32 _statRoom = 0, _statObject = 0, _statCel = 0, _statSan = 0, _statFlat = 0, _statMissing = 0, _statCycle = 0, _statText = 0;
 +	uint32 _statCelTint = 0, _statCelKept = 0;  // HD sprite px tinted, figure px with HD image kept original
++	uint32 _statSoft = 0;  // original px with a soft cel laid over them
 +	Common::String statText() const;
 +};
 +

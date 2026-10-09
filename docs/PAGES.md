@@ -12,7 +12,7 @@ localhost-løsningen med private filer fra maskinen.
 Siden går rett inn i spillet, som originalen: introen, så spillet. Det er ingen
 knapper eller menyer rundt spillet. Grafikkvalget ligger i spillets egen meny.
 
-Første gang ber siden om én ting: en lesenøkkel til det private repoet
+Første gang ber siden om én ting: en lesenøkkel til repoet
 Tombonator3000/Dig-HD-Remake, der spillet (grenen `spilldata`) og HD-pakken
 (grenen `hd-mod`) ligger. Lag nøkkelen på
 https://github.com/settings/personal-access-tokens/new:
@@ -34,7 +34,7 @@ HD-pakken hadde og den nye ikke har, slettes fra nettleseren etter 30 sekunder.
 Uten nett brukes fillisten og filene fra forrige gang.
 
 Ingen spillfil eller HD-fil ligger på nettsiden eller sendes dit. Forespørslene
-går bare til api.github.com for det private repoet. Nettsiden er offentlig, men
+går bare til api.github.com for repoet. Nettsiden er offentlig, men
 uten nøkkel med tilgang til repoet kommer ingen videre enn til nøkkelfeltet.
 Alle Pages-sider under tombonator3000.github.io deler opprinnelse og dermed
 nettleserlagring, så nøkkelen skal bare ha lesetilgang til dette ene repoet.
