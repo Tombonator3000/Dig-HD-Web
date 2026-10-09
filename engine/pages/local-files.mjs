@@ -70,12 +70,31 @@ export function makeIndexes(rows, staticRoot = {}) {
   return indexes;
 }
 
-// A git tree listing as rows for makeIndexes(), with the same rules as a chosen folder
+// A git tree listing as rows for makeIndexes(), with the same rules as a chosen folder.
+// Files over GitHub's 100 MB limit (music and speech) lie in parts NAME.001, NAME.002
+// and so on; they become one row with the parts in order.
 export function treeRows(tree, prefix, kind) {
-  const files = tree
-    .filter(item => item.type === 'blob' && item.path.startsWith(prefix))
-    .map(item => ({name: item.path.split('/').at(-1), webkitRelativePath: 'repo/' + item.path.slice(prefix.length), size: item.size, sha: item.sha}));
-  return selectFiles(files, kind).map(row => ({path: row.path, size: row.size, sha: row.blob.sha}));
+  const files = new Map();
+  for (const item of tree) {
+    if (item.type !== 'blob' || !item.path.startsWith(prefix)) continue;
+    const part = /^(.+)\.(\d{3})$/.exec(item.path.slice(prefix.length));
+    const relative = part ? part[1] : item.path.slice(prefix.length);
+    const file = files.get(relative) || {name: relative.split('/').at(-1), webkitRelativePath: 'repo/' + relative, size: 0, parts: []};
+    file.size += item.size;
+    file.parts.push({n: part ? Number(part[2]) : 0, sha: item.sha, size: item.size});
+    files.set(relative, file);
+  }
+  return selectFiles([...files.values()], kind).map(row => {
+    const parts = row.blob.parts.sort((a, b) => a.n - b.n);
+    const out = {path: row.path, size: row.size, sha: parts.map(p => p.sha).join('+')};
+    if (parts.length > 1) out.parts = parts.map(({sha, size}) => ({sha, size}));
+    return out;
+  });
+}
+
+// All blob ids a listing uses (the parts of split files count one by one)
+export function blobIds(rows) {
+  return new Set(rows.flatMap(row => row.parts ? row.parts.map(p => p.sha) : [row.sha]));
 }
 
 export class ApiError extends Error {
@@ -93,7 +112,7 @@ function apiError(status) {
 
 // Reads a response while telling how far it has come; big files show progress.
 async function readBody(response, size, progress) {
-  if (!response.body || !progress || size < 4 * 1048576) return response.blob();
+  if (!response.body || !progress) return response.blob();
   const reader = response.body.getReader();
   const chunks = [];
   let done = 0;
@@ -108,14 +127,22 @@ async function readBody(response, size, progress) {
   return new Blob(chunks);
 }
 
+const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+
 // The files from the private branches, fetched when the engine asks for them
 // and kept by git blob id, so a new HD pack only fetches what has changed.
+// A lost connection is tried again and again while the game waits: a file the
+// engine cannot open stops the game.
+//   progress(name, done, size): big files on their way
+//   waiting(seconds): the connection is gone, next try in so many seconds
 export class RemoteSource {
-  constructor(library, token, networkFetch, progress = null) {
+  constructor(library, token, networkFetch, {progress = null, waiting = null, sleep = wait} = {}) {
     this.library = library;
     this.token = token;
     this.fetch = networkFetch;
     this.progress = progress;
+    this.waiting = waiting;
+    this.sleep = sleep;
     this.rows = new Map();
   }
 
@@ -123,14 +150,39 @@ export class RemoteSource {
     return this.fetch(API + path, {headers: {Authorization: 'Bearer ' + this.token, Accept: accept}, cache});
   }
 
+  // Runs attempt() until it works. Network errors, 5xx, 429 and rate limits are
+  // tried again (at most `tries` times), a key GitHub rejects is not.
+  async retry(attempt, tries = Infinity) {
+    for (let n = 1; ; n++) {
+      let delay = Math.min(1000 * 2 ** (n - 1), 15000);
+      try {
+        return await attempt();
+      } catch (error) {
+        const limited = error instanceof ApiError && (error.status === 429 || error.status >= 500 || error.rateLimited);
+        if (!(error instanceof TypeError || limited) || n >= tries) throw error;
+        if (error.retryAfter) delay = Math.min(error.retryAfter * 1000, 60000);
+      }
+      this.waiting?.(Math.round(delay / 1000));
+      await this.sleep(delay);
+    }
+  }
+
+  async get(path, accept, cache) {
+    const response = await this.api(path, accept, cache);
+    if (response.ok) return response;
+    const error = apiError(response.status);
+    error.rateLimited = response.status === 403 && (response.headers.get('x-ratelimit-remaining') === '0' || response.headers.has('retry-after'));
+    error.retryAfter = Number(response.headers.get('retry-after')) || 0;
+    throw error;
+  }
+
   // The file lists of both branches. Offline, the last list is used.
   async list() {
     let rows = [];
     try {
       for (const source of SOURCES) {
-        const response = await this.api('git/trees/' + source.branch + '?recursive=1', 'application/vnd.github+json', 'no-store');
-        if (!response.ok) throw apiError(response.status);
-        const data = await response.json();
+        const data = await this.retry(async () =>
+          (await this.get('git/trees/' + source.branch + '?recursive=1', 'application/vnd.github+json', 'no-store')).json(), 3);
         if (data.truncated) throw new Error('Fillisten fra GitHub ble avkortet.');
         rows.push(...treeRows(data.tree, source.prefix, source.kind));
       }
@@ -147,13 +199,30 @@ export class RemoteSource {
   async read(path) {
     const row = this.rows.get(path);
     if (!row) return undefined;
-    const cached = await this.library.getBlob(row.sha);
-    if (cached) return cached;
-    const response = await this.api('git/blobs/' + row.sha, 'application/vnd.github.raw+json');
-    if (!response.ok) throw apiError(response.status);
     const name = path.split('/').at(-1);
-    const blob = await readBody(response, row.size, this.progress && ((done, size) => this.progress(name, done, size)));
-    await this.library.putBlob(row.sha, blob);
+    const parts = row.parts || [{sha: row.sha, size: row.size}];
+    const blobs = [];
+    let before = 0;
+    for (const part of parts) {
+      blobs.push(await this.blob(part, name, before, row.size));
+      before += part.size;
+    }
+    return blobs.length === 1 ? blobs[0] : new Blob(blobs);
+  }
+
+  // One git blob, from the browser if it is there, else from GitHub
+  async blob({sha, size}, name, before, total) {
+    const cached = await this.library.getBlob(sha);
+    if (cached) return cached;
+    const progress = this.progress && ((done) => this.progress(name, before + done, total));
+    const blob = await this.retry(async () => {
+      const response = await this.get('git/blobs/' + sha, 'application/vnd.github.raw+json');
+      const body = await readBody(response, size, progress && total >= 4 * 1048576 ? progress : null);
+      // A connection that breaks off can give a short body without an error
+      if (body.size !== size) throw new TypeError('Filen kom ikke helt fram.');
+      return body;
+    });
+    await this.library.putBlob(sha, blob);
     return blob;
   }
 }

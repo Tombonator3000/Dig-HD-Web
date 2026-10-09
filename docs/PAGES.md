@@ -43,12 +43,28 @@ Grafikk: F5 åpner spillets meny. Der står **HD Graphics** med en
 avkrysningsboks under Text Speed: kryss gir HD, tom boks gir originalgrafikken.
 Valget lagres og gjelder neste gang. Ctrl+H bytter også.
 
-Mobil og nettbrett: første trykk gir fullskjerm og liggende skjerm (der
-nettleseren tillater det). Trykk med to fingre åpner menyen (F5), tre fingre
-hopper over en filmscene (Esc).
+Mobil og nettbrett (`engine/pages/touch.mjs`). Siden tar seg av all berøring på
+spillet selv og gir ScummVM museklikk og taster, så ScummVM sin egen
+berøringsstyring ikke er med:
+
+- trykk: klikk der fingeren var
+- dra: flytter pekeren (det den peker på, lyser opp); å løfte fingeren klikker ikke
+- hold fingeren i ro et halvt sekund: høyreklikk
+- to fingre: spillets meny (F5)
+- tre fingre: hopp over en filmscene (Esc)
+
+Første trykk gir fullskjerm. Skjermen snus ikke; spillet følger hvordan
+telefonen holdes.
+
+Mistes kontakten med GitHub mens spillet trenger en fil, venter spillet og
+siden prøver igjen (etter 1, 2, 4, 8 og så hvert 15. sekund) til filen er
+kommet. Det samme gjelder svar 5xx, 429 og grensen for antall forespørsler. En
+fil som kommer ufullstendig, hentes på nytt. Bare en nøkkel GitHub avviser,
+stopper.
 
 Andre valg i adressen:
 
+- `?uten-lyd` starter uten musikk og tale (se under)
 - `?ny-nokkel` ber om en ny nøkkel (for eksempel når den gamle er utløpt; en
   nøkkel GitHub avviser, gir også nøkkelfeltet igjen)
 - `?rom=22` hopper til stranden for testing, `?klassisk` og `?gult` som ellers
@@ -63,9 +79,16 @@ velges på nytt (`?ny-nokkel` viser feltet og lenken igjen).
 
 HD-pakken bruker 4x grafikk og jevn HD-tekst. Rom, objekter og figurruter med
 HD-bilde vises i HD. Det som ennå ikke finnes i pakken (de fleste figurrutene og
-alle filmene), vises som originalen forstørret fire ganger. DIGMUSIC.BUN og
-DIGVOICE.BUN gir musikk og tale; de ligger ikke i repoet, så spillet er uten
-lyd fra GitHub. Lagrede spill og scummvm.ini ligger i nettleserens lagring
+alle filmene), vises som originalen forstørret fire ganger.
+
+Musikk og tale: DIGMUSIC.BUN (261 MB) og DIGVOICE.BUN (130 MB) ligger i grenen
+`spilldata` i deler på 90 MB (`DIGMUSIC.BUN.001` til `.003`, `DIGVOICE.BUN.001`
+og `.002`), fordi GitHub ikke tar filer over 100 MB. Siden setter delene sammen
+i nettleseren. De hentes første gang spillet spiller musikk, altså like etter
+introen, og ligger i minnet så lenge spillet går (ScummVMs nettleserversjon
+leser hele filer). Målt i Chromium: omtrent 0,9 GB JavaScript-minne og 0,37 GB
+WebAssembly-minne med lyd. Derfor er lyden med bare når nettleseren melder
+minst 4 GB minne (`navigator.deviceMemory`), og `?uten-lyd` slår den av. Lagrede spill og scummvm.ini ligger i nettleserens lagring
 (IDBFS) og blir der selv om spillfilene slettes. Nettlesere kan slette lokal
 lagring ved lite ledig plass, og privatmodus kan gjøre lagringen midlertidig.
 

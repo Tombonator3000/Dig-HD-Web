@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {selectFiles, makeIndexes, privateFetch, summarize, treeRows, RemoteSource, ApiError, REPO, GAME_ROOT, MOD_ROOT} from '../local-files.mjs';
+import {selectFiles, makeIndexes, privateFetch, summarize, treeRows, blobIds, RemoteSource, ApiError, REPO, GAME_ROOT, MOD_ROOT} from '../local-files.mjs';
 
 const file = (name, content = 'sample') => ({name: name.split('/').at(-1), webkitRelativePath: name, size: content.length});
 
@@ -55,23 +55,23 @@ test('private data and missing private files never reach the network; themes use
 const tree = [
   {path: 'README.md', type: 'blob', sha: 'r', size: 10},
   {path: 'game', type: 'tree', sha: 't'},
-  {path: 'game/DIG.LA0', type: 'blob', sha: 'a0', size: 5},
+  {path: 'game/DIG.LA0', type: 'blob', sha: 'a0', size: 7},
   {path: 'game/DIG.LA1', type: 'blob', sha: 'a1', size: 7},
-  {path: 'game/VIDEO/SQ1.SAN', type: 'blob', sha: 's1', size: 9},
+  {path: 'game/VIDEO/SQ1.SAN', type: 'blob', sha: 's1', size: 7},
   {path: 'game/SHA256SUMS', type: 'blob', sha: 'x', size: 3}
 ];
 const modTree = [
-  {path: 'mod.json', type: 'blob', sha: 'm', size: 4},
-  {path: 'rooms/room022.png', type: 'blob', sha: 'r22', size: 6},
-  {path: 'costumes/costume014_003.png', type: 'blob', sha: 'c3', size: 8},
+  {path: 'mod.json', type: 'blob', sha: 'm', size: 6},
+  {path: 'rooms/room022.png', type: 'blob', sha: 'r22', size: 8},
+  {path: 'costumes/costume014_003.png', type: 'blob', sha: 'c3', size: 7},
   {path: 'SHA256SUMS', type: 'blob', sha: 'y', size: 3}
 ];
 
 test('git tree listings become the same paths as chosen folders, with blob ids', () => {
   assert.deepEqual(treeRows(tree, 'game/', 'game'), [
-    {path: GAME_ROOT + 'DIG.LA0', size: 5, sha: 'a0'},
+    {path: GAME_ROOT + 'DIG.LA0', size: 7, sha: 'a0'},
     {path: GAME_ROOT + 'DIG.LA1', size: 7, sha: 'a1'},
-    {path: GAME_ROOT + 'VIDEO/SQ1.SAN', size: 9, sha: 's1'}]);
+    {path: GAME_ROOT + 'VIDEO/SQ1.SAN', size: 7, sha: 's1'}]);
   assert.deepEqual(treeRows(modTree, '', 'mod').map(row => row.path),
     [MOD_ROOT + 'mod.json', MOD_ROOT + 'rooms/room022.png', MOD_ROOT + 'costumes/costume014_003.png']);
 });
@@ -137,4 +137,50 @@ test('with the private branches, game paths never go to the site', async () => {
   assert.equal((await fetch(GAME_ROOT + 'DIGVOICE.BUN')).status, 404);
   assert.equal((await fetch(MOD_ROOT + 'rooms/room023.png')).status, 404);
   assert.deepEqual(site, []);
+});
+
+test('music and speech in parts become one file, read in order', async () => {
+  const parts = [
+    {path: 'game/DIG.LA0', type: 'blob', sha: 'a0', size: 5},
+    {path: 'game/DIG.LA1', type: 'blob', sha: 'a1', size: 7},
+    {path: 'game/DIGMUSIC.BUN.002', type: 'blob', sha: 'm2', size: 3},
+    {path: 'game/DIGMUSIC.BUN.001', type: 'blob', sha: 'm1', size: 4}
+  ];
+  const rows = treeRows(parts, 'game/', 'game');
+  const music = rows.find(row => row.path === GAME_ROOT + 'DIGMUSIC.BUN');
+  assert.equal(music.size, 7);
+  assert.deepEqual(music.parts, [{sha: 'm1', size: 4}, {sha: 'm2', size: 3}]);
+  assert.deepEqual([...blobIds(rows)].sort(), ['a0', 'a1', 'm1', 'm2']);
+
+  const library = memoryLibrary();
+  const source = new RemoteSource(library, 'KEY', async url => {
+    const sha = new URL(url).pathname.split('/').at(-1);
+    return new Response({m1: 'ABCD', m2: 'EFG'}[sha]);
+  });
+  source.rows = new Map(rows.map(row => [row.path, row]));
+  assert.equal(await (await source.read(GAME_ROOT + 'DIGMUSIC.BUN')).text(), 'ABCDEFG');
+  assert.deepEqual([...library.blobs.keys()].sort(), ['m1', 'm2']);
+});
+
+test('a lost connection is tried again until the file comes', async () => {
+  let calls = 0;
+  const waits = [];
+  const source = new RemoteSource(memoryLibrary(), 'KEY', async () => {
+    calls++;
+    if (calls === 1) throw new TypeError('Failed to fetch');
+    if (calls === 2) return new Response('x', {status: 502});
+    if (calls === 3) return new Response('kort');  // body cut off
+    return new Response('hele filen');
+  }, {waiting: s => waits.push(s), sleep: async () => {}});
+  source.rows = new Map([[GAME_ROOT + 'VIDEO/FONT1.NUT', {path: GAME_ROOT + 'VIDEO/FONT1.NUT', size: 10, sha: 'f1'}]]);
+  assert.equal(await (await source.read(GAME_ROOT + 'VIDEO/FONT1.NUT')).text(), 'hele filen');
+  assert.equal(calls, 4);
+  assert.deepEqual(waits, [1, 2, 4]);
+
+  // A key GitHub rejects is not tried again
+  let rejected = 0;
+  const bad = new RemoteSource(memoryLibrary(), 'BAD', async () => { rejected++; return new Response('', {status: 401}); }, {sleep: async () => {}});
+  bad.rows = source.rows;
+  await assert.rejects(bad.read(GAME_ROOT + 'VIDEO/FONT1.NUT'), error => error.status === 401);
+  assert.equal(rejected, 1);
 });

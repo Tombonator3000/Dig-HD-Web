@@ -19,7 +19,7 @@ THEMES = {
     'helpdialog.zip', 'macgui.dat', 'residualvm.zip', 'scummclassic.zip',
     'scummmodern.zip', 'scummremastered.zip', 'shaders.dat', 'translations.dat',
 }
-UI = ('index.html', 'style.css', 'player.mjs', 'local-files.mjs', 'credits.html')
+UI = ('index.html', 'style.css', 'player.mjs', 'local-files.mjs', 'touch.mjs', 'credits.html')
 
 
 def pack(src: Path, out: Path) -> dict:

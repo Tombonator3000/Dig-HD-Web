@@ -1,4 +1,5 @@
-import {LocalLibrary, RemoteSource, ApiError, makeIndexes, privateFetch} from './local-files.mjs';
+import {LocalLibrary, RemoteSource, ApiError, makeIndexes, privateFetch, blobIds} from './local-files.mjs';
+import {attachTouch} from './touch.mjs';
 
 // The page goes straight into the game. Only the first time (no key and no
 // chosen folders) it asks for the read-only key to the private repository.
@@ -40,6 +41,11 @@ function progress(name, done, size) {
   status(done < size ? 'Henter ' + name + ' første gang: ' + megabytes(done) + ' av ' + megabytes(size) + ' MB' : '');
 }
 
+// The connection is gone; the game waits and the file is tried again
+function waiting(seconds) {
+  status('Mistet kontakten med GitHub. Prøver igjen om ' + seconds + ' s …');
+}
+
 $('key').addEventListener('submit', async event => {
   event.preventDefault();
   const token = $('token').value.trim();
@@ -79,7 +85,7 @@ $('again').addEventListener('click', () => location.reload());
 async function startRemote(token) {
   showScreen(null);
   status('Henter fillisten fra GitHub …');
-  const source = new RemoteSource(library, token, networkFetch, progress);
+  const source = new RemoteSource(library, token, networkFetch, {progress, waiting});
   let rows;
   try {
     rows = await source.list();
@@ -92,9 +98,12 @@ async function startRemote(token) {
     }
     return;
   }
-  await launch(source, rows);
+  // Music and speech (391 MB) stay in memory while the game runs. Left out
+  // with ?uten-lyd, and on devices that report less than 4 GB memory.
+  const withoutSound = query.has('uten-lyd') || (navigator.deviceMemory && navigator.deviceMemory < 4);
+  await launch(source, withoutSound ? rows.filter(row => !/\.BUN$/.test(row.path)) : rows);
   // Files an older HD pack had, are removed when the game has started
-  setTimeout(() => library.pruneBlobs(new Set(rows.map(row => row.sha))).catch(() => {}), 30000);
+  setTimeout(() => library.pruneBlobs(blobIds(rows)).catch(() => {}), 30000);
 }
 
 function startLocal() {
@@ -109,26 +118,9 @@ function sendKey(key, code, keyCode) {
   setTimeout(() => dispatch('keyup'), 120);
 }
 
-// Touch: two fingers open the game's menu (F5), three skip a scene (Esc)
-let fingers = 0;
-canvas.addEventListener('touchstart', event => {
-  fingers = Math.max(fingers, event.touches.length);
-  if (event.touches.length > 1) event.preventDefault();
-}, {passive: false});
-canvas.addEventListener('touchend', event => {
-  if (event.touches.length) return;
-  if (fingers === 2) sendKey('F5', 'F5', 116);
-  else if (fingers === 3) sendKey('Escape', 'Escape', 27);
-  fingers = 0;
-});
-
-// On a phone the game gets the whole screen, turned sideways, at the first touch
-canvas.addEventListener('pointerdown', () => {
-  if (!matchMedia('(pointer: coarse)').matches || document.fullscreenElement || !document.documentElement.requestFullscreen) return;
-  document.documentElement.requestFullscreen({navigationUI: 'hide'})
-    .then(() => screen.orientation?.lock?.('landscape')?.catch(() => {}))
-    .catch(() => {});
-});
+// Touch on phones and tablets (touch.mjs): tap, drag, hold, two and three fingers
+const keys = {F5: ['F5', 'F5', 116], Escape: ['Escape', 'Escape', 27]};
+attachTouch(canvas, name => sendKey(...keys[name]));
 
 canvas.addEventListener('contextmenu', event => event.preventDefault());
 canvas.addEventListener('webglcontextlost', event => {
@@ -146,7 +138,10 @@ async function launch(source, rows) {
     if (!response.ok) throw new Error('Fant ikke spillmotorens data. Last siden på nytt.');
     const indexes = makeIndexes(rows, await response.json());
     // A file the game could not get is shown, not swallowed
-    const reader = {read: path => source.read(path).catch(error => { status(error.message, true); throw error; })};
+    const reader = {read: path => source.read(path).then(blob => {
+      if (/^Mistet kontakten/.test(statusElement.textContent)) status();
+      return blob;
+    }, error => { status(error.message, true); throw error; })};
     window.fetch = privateFetch(reader, indexes, baseURL, networkFetch);
 
     const env = {DIGHD_MOD: '/data/mods/gpt', HOME: '/home/dig-hd' + baseURL.pathname.replace(/[^a-zA-Z0-9_-]/g, '_')};
