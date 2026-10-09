@@ -23,12 +23,14 @@ test('HD objects and figure cels are imported and counted without their _idx fil
     file('gpt/objects/obj097_0a.png'), file('gpt/objects/obj097_0a_idx.png'),
     file('gpt/costumes/costume014_003.png'), file('gpt/costumes/costume014_003_idx.png'),
     file('gpt/costumes/costume014_016.png'), file('gpt/costumes/costume014_016_idx.png'),
+    file('gpt/costumes/costume014_016_hd.png'),
     file('gpt/SHA256SUMS'), file('gpt/README.md')], 'mod');
-  assert.equal(rows.length, 9);
+  assert.equal(rows.length, 10);
+  assert.ok(rows.some(row => row.path === MOD_ROOT + 'costumes/costume014_016_hd.png'));
   assert.ok(rows.some(row => row.path === MOD_ROOT + 'costumes/costume014_016_idx.png'));
   const sum = summarize(rows, '2026-10-09 09:49');
   assert.deepEqual([sum.rooms, sum.objects, sum.cels, sum.created], [1, 1, 2, '2026-10-09 09:49']);
-  assert.equal(sum.bytes, 9 * 'sample'.length);
+  assert.equal(sum.bytes, 10 * 'sample'.length);
 });
 
 test('ScummVM directory indexes combine local game/HD files with built-in themes', () => {
