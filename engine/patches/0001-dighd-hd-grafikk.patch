@@ -116,7 +116,7 @@ index d93b33e2..d5f4b18c 100644
  	if (drawToBackBuf)
  		_out.setPixels(vs.getBackPixels(0, 0));
 diff --git a/engines/scumm/charset.cpp b/engines/scumm/charset.cpp
-index 190e1818..87e45448 100644
+index 190e1818..910c09bc 100644
 --- a/engines/scumm/charset.cpp
 +++ b/engines/scumm/charset.cpp
 @@ -21,6 +21,7 @@
@@ -127,7 +127,7 @@ index 190e1818..87e45448 100644
  #include "scumm/file.h"
  #include "scumm/scumm.h"
  #include "scumm/macgui/macgui.h"
-@@ -2043,6 +2044,41 @@ int CharsetRendererV7::drawCharV7(byte *buffer, Common::Rect &clipRect, int x, i
+@@ -2043,6 +2044,43 @@ int CharsetRendererV7::drawCharV7(byte *buffer, Common::Rect &clipRect, int x, i
  	const byte *src = _charPtr;
  	byte *dst = buffer + (y + _offsY) * pitch + x;
  	uint8 bpp = *_fontPtr;
@@ -163,6 +163,8 @@ index 190e1818..87e45448 100644
 +		g.x1 = width;
 +		g.y0 = MAX(0, -(y + _offsY));
 +		g.y1 = height;
++		g.font = _curId;
++		g.chr = chr;
 +		_vm->_digHD->noteGlyph(g);
 +	}
 +
@@ -195,10 +197,10 @@ index 21938706..3b478c6a 100644
  							hotspotX, hotspotY,
 diff --git a/engines/scumm/dighd.cpp b/engines/scumm/dighd.cpp
 new file mode 100644
-index 00000000..25f65582
+index 00000000..99274428
 --- /dev/null
 +++ b/engines/scumm/dighd.cpp
-@@ -0,0 +1,3260 @@
+@@ -0,0 +1,3494 @@
 +/* ScummVM - Graphic Adventure Engine
 + *
 + * ScummVM is the legal property of its developers, whose names
@@ -398,12 +400,14 @@ index 00000000..25f65582
 +	_showMissing = envInt("DIGHD_SHOW_MISSING", confBool("dighd_show_missing")) != 0;
 +	_dumpFlat = envInt("DIGHD_DUMP_FLAT", 0) != 0;
 +
-+	// How glyphs are scaled: xbr (standard), scale4x, nearest (for tests: the
-+	// HD text is then the original text), or off (text as original pixels)
++	// How glyphs are made: font (standard: the HD typeface where the mod has
++	// one, else xbr), xbr, scale4x, nearest (for tests: the HD text is then the
++	// original text), or off (text as original pixels)
 +	Common::String textScaler = ConfMan.get("dighd_text");
 +	if (const char *env = getenv("DIGHD_TEXT"))
 +		textScaler = env;
 +	textScaler.toLowercase();
++	_textFace = textScaler.empty() || textScaler == "font";
 +	if (textScaler == "off" || textScaler == "0")
 +		_textScaler = kTextOff;
 +	else if (textScaler == "nearest")
@@ -1690,7 +1694,13 @@ index 00000000..25f65582
 +	memset(pal, 0, sizeof(pal));
 +	for (int l = 0; l < levels; l++)
 +		pal[l] = g.map[rawOf[l]];
-+	const int shape = glyphShape(g.w, g.h, levels, lev, nullptr);
++	// The HD typeface when the mod has the letter, else the glyph scaled from the font image
++	int shape = -1;
++	const int face = faceGlyph(g.font, g.chr);
++	if (face >= 0)
++		shape = glyphShape(g.w, g.h, levels, lev, nullptr, face);
++	if (shape < 0)
++		shape = glyphShape(g.w, g.h, levels, lev, nullptr);
 +	const int style = shape < 0 ? -1 : glyphStyle(shape, pal);
 +	if (style <= 0)
 +		return false;
@@ -1740,6 +1750,8 @@ index 00000000..25f65582
 +		const GlyphInstance &gi = t.pending[i];
 +		const GlyphStyle st = _glyphStyles[gi.style];
 +		const GlyphShape &sh = _glyphShapes[st.shape];
++		if (sh.face >= 0)
++			continue;  // a typeface letter is whole on its own
 +		const int w = sh.w, h = sh.h, levels = sh.levels, pw = w + 2 * P, ph = h + 2 * P;
 +		memcpy(lev, sh.lev.data(), w * h);
 +		memset(ctx, 0, pw * ph);
@@ -1784,11 +1796,13 @@ index 00000000..25f65582
 +	t.pending.clear();
 +}
 +
-+int DigHD::glyphShape(int w, int h, int levels, const byte *lev, const byte *ctx) {
++int DigHD::glyphShape(int w, int h, int levels, const byte *lev, const byte *ctx, int face) {
 +	const int csize = (w + 2 * kGlyphPad) * (h + 2 * kGlyphPad);
 +	uint64 hash = 1469598103934665603ULL;  // FNV-1a
 +	hash = (hash ^ (uint64)w) * 1099511628211ULL;
 +	hash = (hash ^ (uint64)h) * 1099511628211ULL;
++	if (face >= 0)
++		hash = (hash ^ (0x5A000000ULL | (uint64)face)) * 1099511628211ULL;
 +	for (int i = 0; i < w * h; i++)
 +		hash = (hash ^ lev[i]) * 1099511628211ULL;
 +	if (ctx) {
@@ -1800,11 +1814,11 @@ index 00000000..25f65582
 +	if (_glyphShapeIndex.tryGetVal(hash, shape)) {
 +		const GlyphShape &s = _glyphShapes[shape];
 +		if (s.w != w || s.h != h || memcmp(s.lev.data(), lev, w * h) || s.ctx.empty() != !ctx ||
-+		    (ctx && memcmp(s.ctx.data(), ctx, csize)))
++		    (ctx && memcmp(s.ctx.data(), ctx, csize)) || s.face != face)
 +			return -1;  // hash collision: this glyph stays as it is
 +		return shape;
 +	}
-+	if (_glyphShapes.size() >= kMaxGlyphShapes)
++	if (_glyphShapes.size() >= kMaxGlyphShapes || (face >= 0 && _faceFailed.contains(hash)))
 +		return -1;
 +	GlyphShape s;
 +	s.w = w;
@@ -1816,7 +1830,15 @@ index 00000000..25f65582
 +		s.ctx.resize(csize);
 +		memcpy(s.ctx.data(), ctx, csize);
 +	}
-+	makeGlyphHD(s);
++	if (face >= 0) {
++		s.face = face;
++		if (!makeFaceGlyph(s)) {
++			_faceFailed[hash] = true;  // drawn from the font image instead
++			return -1;
++		}
++	} else {
++		makeGlyphHD(s);
++	}
 +	shape = _glyphShapes.size();
 +	_glyphShapes.push_back(s);
 +	_glyphShapeIndex[hash] = shape;
@@ -2078,6 +2100,220 @@ index 00000000..25f65582
 +				s.cover[(y / n) * s.w + x / n] = 1;
 +		}
 +	}
++}
++
++int DigHD::faceGlyph(int font, int chr) {
++	// The typeface letter for a character of a game font, or -1
++	if (!_textFace || _textScaler == kTextOff || font < 0 || chr < 33 || chr > 126)
++		return -1;
++	if (!_faceMapLoaded) {
++		// fonts/map.txt: "<game font> <folder>" per line, # starts a comment.
++		// Game fonts are the charset numbers, and 100 + n for FONTn.NUT.
++		_faceMapLoaded = true;
++		Common::FSNode node(_modPath.join("fonts/map.txt"));
++		if (Common::SeekableReadStream *in = node.exists() ? node.createReadStream() : nullptr) {
++			while (!in->eos() && !in->err()) {
++				Common::String line = in->readLine();
++				const int hashPos = line.findFirstOf('#');
++				if (hashPos >= 0)
++					line = line.substr(0, hashPos);
++				line.trim();
++				const int sp = line.findFirstOf(" \t");
++				if (line.empty() || sp <= 0)
++					continue;
++				Common::String folder = line.substr(sp + 1);
++				folder.trim();
++				_faceOfFont[atoi(line.substr(0, sp).c_str())] = folder;
++			}
++			delete in;
++			debug("DigHD: HD typeface for %u game fonts", _faceOfFont.size());
++		}
++	}
++	const uint32 key = ((uint32)(font & 0xFFFF) << 8) | (uint32)chr;
++	int index = -1;
++	if (_faceIndex.tryGetVal(key, index))
++		return index;
++	_faceIndex[key] = -1;
++	Common::String folder;
++	if (!_faceOfFont.tryGetVal(font, folder))
++		return -1;
++	Common::FSNode node(_modPath.join(Common::String::format("fonts/%s/%03d.png", folder.c_str(), chr)));
++	if (!node.exists())
++		return -1;
++	::Image::PNGDecoder dec;
++	Common::SeekableReadStream *s = node.createReadStream();
++	const bool ok = s && dec.loadStream(*s);
++	delete s;
++	if (!ok)
++		return -1;
++	const Graphics::Palette &pal = dec.getPalette();
++	Graphics::Surface *conv = dec.getSurface()->convertTo(_rgba, pal.size() ? pal.data() : nullptr, pal.size());
++	FaceGlyph fg;
++	fg.w = conv->w;
++	fg.h = conv->h;
++	fg.cov.resize(fg.w * fg.h);
++	for (int y = 0; y < fg.h; y++)
++		for (int x = 0; x < fg.w; x++)
++			fg.cov[y * fg.w + x] = (*(const uint32 *)conv->getBasePtr(x, y) >> _rgba.aShift) & 0xFF;
++	conv->free();
++	delete conv;
++	if (!fg.w || !fg.h)
++		return -1;
++	index = _faceGlyphs.size();
++	_faceGlyphs.push_back(fg);
++	_faceIndex[key] = index;
++	return index;
++}
++
++bool DigHD::makeFaceGlyph(GlyphShape &s) {
++	// The letter is drawn with the HD typeface instead of being scaled from the
++	// font image. It fills the box of the original letter's pixels, so it keeps
++	// the size and place of the original and the layout of the text. The other
++	// colour of the glyph is made from it the way the original has it: an
++	// outline around the letter, or a shadow beside it. Glyphs with more colours
++	// are drawn from the font image (returns false).
++	const FaceGlyph &fg = _faceGlyphs[s.face];
++	const int w = s.w, h = s.h, L = s.levels, n = _scale;
++	if (L < 1 || L > 2)
++		return false;
++	auto own = [&](int x, int y) { return (x < 0 || y < 0 || x >= w || y >= h) ? 0 : (int)s.lev[y * w + x]; };
++	int fill = 1, other = 0;
++	if (L == 2) {
++		// The other colour is the one that lies most along the outside
++		int outside[3] = { 0, 0, 0 };
++		for (int y = 0; y < h; y++)
++			for (int x = 0; x < w; x++) {
++				const int v = own(x, y);
++				if (v && (!own(x - 1, y) || !own(x + 1, y) || !own(x, y - 1) || !own(x, y + 1)))
++					outside[v]++;
++			}
++		other = outside[2] >= outside[1] ? 2 : 1;
++		fill = 3 - other;
++	}
++	int fx0 = w, fy0 = h, fx1 = -1, fy1 = -1;
++	for (int y = 0; y < h; y++)
++		for (int x = 0; x < w; x++)
++			if (own(x, y) == fill) {
++				fx0 = MIN(fx0, x); fx1 = MAX(fx1, x);
++				fy0 = MIN(fy0, y); fy1 = MAX(fy1, y);
++			}
++	if (fx1 < 0)
++		return false;
++
++	// How the other colour relates to the letter: a ring around it (mode 1) or
++	// the letter moved by one pixel (mode 2, shadow). Chosen by overlap with the
++	// original, which must be good.
++	int mode = 0, sdx = 0, sdy = 0;
++	if (other) {
++		auto isFill = [&](int x, int y) { return own(x, y) == fill; };
++		float best = 0.0f;
++		const int shifts[][2] = { { 0, 0 }, { 1, 0 }, { 0, 1 }, { 1, 1 }, { -1, 0 }, { -1, 1 } };
++		for (int c = 0; c < 6; c++) {
++			int inter = 0, uni = 0;
++			for (int y = 0; y < h; y++)
++				for (int x = 0; x < w; x++) {
++					bool cand;
++					if (c == 0) {
++						bool near = false;
++						for (int dy = -1; dy <= 1 && !near; dy++)
++							for (int dx = -1; dx <= 1 && !near; dx++)
++								near = isFill(x + dx, y + dy);
++						cand = near && !isFill(x, y);
++					} else {
++						cand = isFill(x - shifts[c][0], y - shifts[c][1]) && !isFill(x, y);
++					}
++					const bool o = own(x, y) == other;
++					inter += cand && o;
++					uni += cand || o;
++				}
++			const float iou = uni ? (float)inter / uni : 0.0f;
++			if (iou > best) {
++				best = iou;
++				mode = c == 0 ? 1 : 2;
++				sdx = shifts[c][0];
++				sdy = shifts[c][1];
++			}
++		}
++		if (best < 0.6f)
++			return false;
++	}
++
++	// The letter's coverage at the screen scale, fitted to the box of the
++	// original letter (4 x 4 samples per HD pixel from the typeface image)
++	const int hw = w * n, hh = h * n;
++	Common::Array<float> cov(hw * hh, 0.0f);
++	// The height of the box is kept. The width follows the typeface (the
++	// screen is shown 1.2 times taller than its pixels, as the game is), so a
++	// narrow letter is not stretched to the serifs of the pixel font. It is
++	// centred in the box, and never wider than the box.
++	const float boxW = (fx1 + 1 - fx0) * n, bh = (fy1 + 1 - fy0) * n, by0 = fy0 * n;
++	const float bw = MIN(boxW, (float)fg.w * bh / fg.h * 1.2f);
++	const float bx0 = fx0 * n + (boxW - bw) / 2;
++	auto sample = [&](float u, float v) {
++		// bilinear in the typeface image, 0 outside
++		const float fu = u * fg.w - 0.5f, fv = v * fg.h - 0.5f;
++		const int u0 = (int)floorf(fu), v0 = (int)floorf(fv);
++		const float au = fu - u0, av = fv - v0;
++		float acc = 0.0f;
++		for (int t = 0; t < 4; t++) {
++			const int uu = u0 + (t & 1), vv = v0 + (t >> 1);
++			if (uu < 0 || vv < 0 || uu >= fg.w || vv >= fg.h)
++				continue;
++			acc += fg.cov[vv * fg.w + uu] * ((t & 1) ? au : 1 - au) * ((t >> 1) ? av : 1 - av);
++		}
++		return acc / 255.0f;
++	};
++	for (int y = 0; y < hh; y++)
++		for (int x = 0; x < hw; x++) {
++			float acc = 0.0f;
++			for (int sy = 0; sy < 4; sy++)
++				for (int sx = 0; sx < 4; sx++)
++					acc += sample((x + (sx + 0.5f) / 4 - bx0) / bw, (y + (sy + 0.5f) / 4 - by0) / bh);
++			cov[y * hw + x] = acc / 16;
++		}
++
++	// The other colour: a ring of one original pixel around the letter, or the
++	// letter moved by one original pixel, where the letter is not
++	Common::Array<float> oth(hw * hh, 0.0f);
++	if (mode == 1) {
++		const int r = n;
++		for (int y = 0; y < hh; y++)
++			for (int x = 0; x < hw; x++) {
++				float m = 0.0f;
++				for (int dy = -r; dy <= r; dy++)
++					for (int dx = -r; dx <= r; dx++) {
++						const int xx = x + dx, yy = y + dy;
++						if (xx < 0 || yy < 0 || xx >= hw || yy >= hh || dx * dx + dy * dy > r * r + r)
++							continue;
++						m = MAX(m, cov[yy * hw + xx]);
++					}
++				oth[y * hw + x] = MAX(0.0f, m - cov[y * hw + x]);
++			}
++	} else if (mode == 2) {
++		for (int y = 0; y < hh; y++)
++			for (int x = 0; x < hw; x++) {
++				const int xx = x - sdx * n, yy = y - sdy * n;
++				const float m = (xx >= 0 && yy >= 0 && xx < hw && yy < hh) ? cov[yy * hw + xx] : 0.0f;
++				oth[y * hw + x] = MAX(0.0f, m - cov[y * hw + x]);
++			}
++	}
++
++	s.hd.resize(hw * hh * kMaxGlyphLevels);
++	memset(s.hd.data(), 0, s.hd.size());
++	s.cover.resize(w * h);
++	memset(s.cover.data(), 0, s.cover.size());
++	for (int y = 0; y < hh; y++)
++		for (int x = 0; x < hw; x++) {
++			byte *o = s.hd.data() + (y * hw + x) * kMaxGlyphLevels;
++			const int a = CLIP((int)(cov[y * hw + x] * 255.0f + 0.5f), 0, 255);
++			const int b = other ? CLIP((int)(oth[y * hw + x] * 255.0f + 0.5f), 0, 255 - a) : 0;
++			o[fill - 1] = a;
++			if (other)
++				o[other - 1] = b;
++			if (a + b)
++				s.cover[(y / n) * w + x / n] = 1;
++		}
++	return true;
 +}
 +
 +void DigHD::composeText(byte *out, int outPitch, uint32 ref) {
@@ -3461,10 +3697,10 @@ index 00000000..25f65582
 +} // End of namespace Scumm
 diff --git a/engines/scumm/dighd.h b/engines/scumm/dighd.h
 new file mode 100644
-index 00000000..2e8e2677
+index 00000000..5aa37258
 --- /dev/null
 +++ b/engines/scumm/dighd.h
-@@ -0,0 +1,465 @@
+@@ -0,0 +1,484 @@
 +/* ScummVM - Graphic Adventure Engine
 + *
 + * ScummVM is the legal property of its developers, whose names
@@ -3585,6 +3821,8 @@ index 00000000..2e8e2677
 +		int transparent;     // raw value that is not drawn
 +		const byte *map;     // palette index written for each raw value (256 entries)
 +		int x0, y0, x1, y1;  // the part that is drawn, in glyph coordinates
++		int font = -1;       // which font: the charset number, or 100 + n for FONTn.NUT
++		int chr = -1;        // character code
 +	};
 +	void noteGlyph(const GlyphDraw &g);
 +	/** The texts of the game screen are removed (start of each frame, removeBlastTexts()). */
@@ -3752,6 +3990,7 @@ index 00000000..2e8e2677
 +		                            // that have one of its colours, empty for the glyph on its own
 +		Common::Array<byte> cover;  // w * h: 1 where the HD block holds some of the glyph
 +		Common::Array<byte> hd;     // (w * scale) x (h * scale) x 4: weight 0..255 of level 1..4
++		int face = -1;              // drawn with this typeface glyph (_faceGlyphs), see makeFaceGlyph()
 +	};
 +	struct GlyphStyle {
 +		int shape = 0;
@@ -3777,7 +4016,23 @@ index 00000000..2e8e2677
 +		void clear();
 +	};
 +	bool noteGlyphHD(const GlyphDraw &g);
-+	int glyphShape(int w, int h, int levels, const byte *lev, const byte *ctx);
++	int glyphShape(int w, int h, int levels, const byte *lev, const byte *ctx, int face = -1);
++
++	// HD typeface for the text: fonts/map.txt says which typeface (a folder in
++	// fonts/) each game font is drawn with, and fonts/<folder>/NNN.png holds the
++	// letter for character code NNN, cropped to the ink, coverage in the alpha.
++	struct FaceGlyph {
++		int w = 0, h = 0;
++		Common::Array<byte> cov;  // w * h, 0..255
++	};
++	int faceGlyph(int font, int chr);
++	bool makeFaceGlyph(GlyphShape &s);
++	bool _textFace = true;      // DIGHD_TEXT font (standard): the typeface where the mod has one
++	bool _faceMapLoaded = false;
++	Common::HashMap<int, Common::String> _faceOfFont;  // game font -> typeface folder
++	Common::HashMap<uint32, int> _faceIndex;            // font << 8 | chr -> _faceGlyphs, -1 = none
++	Common::Array<FaceGlyph> _faceGlyphs;
++	Common::HashMap<uint64, bool> _faceFailed;          // glyph shapes the typeface cannot draw
 +	int glyphStyle(int shape, const byte *pal);
 +	void makeGlyphHD(GlyphShape &s);
 +	void finishText(TextLayer &t);
@@ -4240,7 +4495,7 @@ index b0f7e3eb..42985c9e 100644
  	akos.o \
  	base-costume.o \
 diff --git a/engines/scumm/nut_renderer.cpp b/engines/scumm/nut_renderer.cpp
-index f8fc7110..e578ba90 100644
+index f8fc7110..d3add497 100644
 --- a/engines/scumm/nut_renderer.cpp
 +++ b/engines/scumm/nut_renderer.cpp
 @@ -23,6 +23,7 @@
@@ -4251,7 +4506,28 @@ index f8fc7110..e578ba90 100644
  #include "scumm/util.h"
  
  namespace Scumm {
-@@ -434,6 +435,30 @@ int NutRenderer::drawCharV7(byte *buffer, Common::Rect &clipRect, int x, int y,
+@@ -38,7 +39,8 @@ NutRenderer::NutRenderer(ScummEngine *vm, const char *filename) :
+ 	_2byteMainColor(0),
+ 	_spacing(vm->_useCJKMode && vm->_language != Common::JA_JPN ? 1 : 0),
+ 	_2byteSteps(vm->_game.version == 8 ? 4 : 2),
+-	_direction(vm->_language == Common::HE_ISR ? -1 : 1) {
++	_direction(vm->_language == Common::HE_ISR ? -1 : 1),
++	_digFontId(-1) {
+ 		static const int8 cjkShadowOffsetsX[4] = { -1, 0, 1, 0 };
+ 		static const int8 cjkShadowOffsetsY[4] = { 0, 1, 0, 0 };
+ 		_2byteShadowXOffsetTable = &cjkShadowOffsetsX[ARRAYSIZE(cjkShadowOffsetsX) - _2byteSteps];
+@@ -47,6 +49,10 @@ NutRenderer::NutRenderer(ScummEngine *vm, const char *filename) :
+ 		memset(_2byteColorTable, 0, _2byteSteps);
+ 		_2byteMainColor = &_2byteColorTable[_2byteSteps - 1];
+ 		memset(_chars, 0, sizeof(_chars));
++		// DigHD: font<n>.nut is HD font id 100+n.
++		int n;
++		if (filename && sscanf(filename, "font%d.nut", &n) == 1)
++			_digFontId = 100 + n;
+ 		if (filename)
+ 			loadFont(filename);
+ }
+@@ -434,6 +440,32 @@ int NutRenderer::drawCharV7(byte *buffer, Common::Rect &clipRect, int x, int y,
  	int clipWdth = (_chars[chr].width - width);
  	char color = (col != -1) ? col : 1;
  
@@ -4276,12 +4552,26 @@ index f8fc7110..e578ba90 100644
 +		g.x1 = width;
 +		g.y0 = minY;
 +		g.y1 = height;
++		g.font = _digFontId;
++		g.chr = chr;
 +		_vm->_digHD->noteGlyph(g);
 +	}
 +
  	if (_vm->_game.version == 7) {
  		if (hardcodedColors) {
  			for (int j = minY; j < height; j++) {
+diff --git a/engines/scumm/nut_renderer.h b/engines/scumm/nut_renderer.h
+index 7dc15ebe..89e4eec7 100644
+--- a/engines/scumm/nut_renderer.h
++++ b/engines/scumm/nut_renderer.h
+@@ -50,6 +50,7 @@ protected:
+ 	uint8 *_2byteColorTable;
+ 	uint8 *_2byteMainColor;
+ 	const int _2byteSteps;
++	int _digFontId;	// DigHD: HD font id, 100 + n for font<n>.nut
+ 
+ 	struct {
+ 		uint16 width;
 diff --git a/engines/scumm/object.cpp b/engines/scumm/object.cpp
 index 0e97ae97..eb0f5cb7 100644
 --- a/engines/scumm/object.cpp

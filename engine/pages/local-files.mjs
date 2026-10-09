@@ -25,7 +25,7 @@ export function selectFiles(files, kind) {
       relative = relative.toUpperCase();
       if (!/^(DIG\.(LA0|LA1)|DIG(MUSIC|VOICE)\.BUN|VIDEO\/[A-Z0-9_.-]+\.(SAN|NUT|TRS))$/.test(relative)) continue;
     } else {
-      if (!/^(mod\.json|rooms\/room\d+(_idx)?\.png|objects\/obj\d+_[0-9a-fA-F]{2}(_idx)?\.png|costumes\/costume\d+_\d+(_idx|_hd)?\.png|san\/[A-Za-z0-9_-]+\/\d+\.png)$/.test(relative)) continue;
+      if (!/^(mod\.json|rooms\/room\d+(_idx)?\.png|objects\/obj\d+_[0-9a-fA-F]{2}(_idx)?\.png|costumes\/costume\d+_\d+(_idx|_hd)?\.png|fonts\/map\.txt|fonts\/[a-z0-9-]+\/\d{3}\.png|san\/[A-Za-z0-9_-]+\/\d+\.png)$/.test(relative)) continue;
     }
     const path = root + relative;
     if (selected.has(path)) throw new Error('To filer har samme navn: ' + relative);
