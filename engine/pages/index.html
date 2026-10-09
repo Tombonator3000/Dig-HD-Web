@@ -32,6 +32,13 @@
     <button type="button" id="again">Spill igjen</button>
   </div>
 
+  <!-- Store filer første gang (musikk, tale, spillet, filmer): hvor langt nedlastingen har kommet -->
+  <div id="loading" hidden>
+    <p id="loading-text"></p>
+    <div class="bar"><div id="loading-bar"></div></div>
+    <p class="small">Bare første gang. Etterpå starter spillet med en gang.</p>
+  </div>
+
   <div id="status" role="status" aria-live="polite" hidden></div>
   <script type="module" src="player.mjs"></script>
 </body>

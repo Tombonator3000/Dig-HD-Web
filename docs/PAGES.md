@@ -39,6 +39,24 @@ uten nøkkel med tilgang til repoet kommer ingen videre enn til nøkkelfeltet.
 Alle Pages-sider under tombonator3000.github.io deler opprinnelse og dermed
 nettleserlagring, så nøkkelen skal bare ha lesetilgang til dette ene repoet.
 
+Første start henter talen (130 MB), musikken (261 MB), spillet (88 MB) og
+introfilmen (50 MB) før spillet kan vise noe, fordi ScummVM åpner lydfilene når
+motoren starter. Siden viser da et svart bilde med hva som lastes ned og hvor
+langt det har kommet (for eksempel "Laster ned musikken: 120 av 261 MB").
+Senere starter spillet med en gang.
+
+Fullskjerm: nettlesere tillater fullskjerm bare etter et klikk eller en tast,
+så spillet går over i fullskjerm ved det første klikket eller tastetrykket.
+I Chrome og Edge låses Esc (Keyboard Lock), så Esc fortsatt hopper over en
+scene; hold Esc for å gå ut av fullskjerm. Firefox går ut av fullskjerm på Esc,
+og neste klikk eller tast gir fullskjerm igjen.
+
+Tegning: spillet tegnes med WebGL. Har nettleseren ikke WebGL (slått av, eller
+grafikkortet er sperret), bruker siden ScummVMs programvaretegning
+(`--gfx-mode=surfacesdl`), og `?programvare` velger den med vilje. Kan
+nettleseren ikke tegne spillet i det hele tatt, sier siden det i stedet for å
+bli stående på "Starter The Dig".
+
 Grafikk: F5 åpner spillets meny. Der står **HD Graphics** med en
 avkrysningsboks under Text Speed: kryss gir HD, tom boks gir originalgrafikken.
 Valget lagres og gjelder neste gang. Ctrl+H bytter også.
@@ -65,6 +83,7 @@ stopper.
 Andre valg i adressen:
 
 - `?uten-lyd` starter uten musikk og tale (se under)
+- `?programvare` tegner uten WebGL
 - `?ny-nokkel` ber om en ny nøkkel (for eksempel når den gamle er utløpt; en
   nøkkel GitHub avviser, gir også nøkkelfeltet igjen)
 - `?rom=22` hopper til stranden for testing, `?klassisk` og `?gult` som ellers

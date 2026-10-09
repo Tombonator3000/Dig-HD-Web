@@ -36,10 +36,42 @@ function megabytes(bytes) {
   return Math.round(bytes / 1048576);
 }
 
-// Big files are fetched once and kept; show how far it has come
+// Big files are fetched once and kept. The game waits for them, so the screen
+// says what is coming and how far it has come.
+const fileNames = {'DIGMUSIC.BUN': 'musikken', 'DIGVOICE.BUN': 'talen', 'DIG.LA1': 'spillet'};
 function progress(name, done, size) {
-  status(done < size ? 'Henter ' + name + ' første gang: ' + megabytes(done) + ' av ' + megabytes(size) + ' MB' : '');
+  if (done >= size) {
+    $('loading').hidden = true;
+    return;
+  }
+  const what = fileNames[name] || (/\.SAN$/.test(name) ? 'filmen' : name);
+  $('loading-text').textContent = 'Laster ned ' + what + ': ' + megabytes(done) + ' av ' + megabytes(size) + ' MB';
+  $('loading-bar').style.width = (100 * done / size).toFixed(1) + '%';
+  $('loading').hidden = false;
 }
+
+// WebGL draws the game. Without it, ScummVM's software drawing is used.
+function hasWebGL() {
+  try {
+    const test = document.createElement('canvas');
+    return Boolean(test.getContext('webgl2') || test.getContext('webgl'));
+  } catch {
+    return false;
+  }
+}
+
+// The whole screen: browsers allow it only after a click or a key, so it comes
+// with the first one. In Chrome and Edge Esc then still reaches the game (skip a
+// scene); holding Esc leaves full screen. Firefox leaves full screen on Esc, and
+// the next click or key brings it back.
+function fullscreen() {
+  if (!started || document.fullscreenElement || !document.documentElement.requestFullscreen) return;
+  document.documentElement.requestFullscreen({navigationUI: 'hide'})
+    .then(() => navigator.keyboard?.lock?.(['Escape']))
+    .catch(() => {});
+}
+window.addEventListener('mousedown', fullscreen, true);
+window.addEventListener('keydown', fullscreen, true);
 
 // The connection is gone; the game waits and the file is tried again
 function waiting(seconds) {
@@ -154,7 +186,9 @@ async function launch(source, rows) {
     if (query.has('gult')) env.DIGHD_SHOW_MISSING = '1';
     // The engine's test hooks work here too (docs/HD-MOTOR.md)
     for (const [key, value] of query) if (/^DIGHD_(TEST_[A-Z0-9_]+|SKIP_VIDEO|TEXT|VERIFY|BENCH)$/.test(key)) env[key] = value;
-    const args = ['--path=/data/games/dig', '--savepath=' + env.HOME, '--aspect-ratio', '--subtitles', 'dig'];
+    const args = ['--path=/data/games/dig', '--savepath=' + env.HOME, '--aspect-ratio', '--subtitles'];
+    if (query.has('programvare') || !hasWebGL()) args.push('--gfx-mode=surfacesdl');
+    args.push('dig');
     history.replaceState(null, '', location.pathname + location.search + '#' + args.join(' '));
 
     canvas.focus();
@@ -177,17 +211,25 @@ async function launch(source, rows) {
       onExit: () => { status(); showScreen('ended'); },
       print: text => {
         console.log(text);
+        if (/Could not load any graphics mode/.test(text)) {
+          status('Nettleseren fikk ikke tegnet spillet. Slå på maskinvareakselerasjon i nettleseren, eller legg ?programvare bak adressen.', true);
+        }
         // The canvas gets its right size after a resize event
         if (/^DigHD: screen /.test(text)) {
           setTimeout(() => {
             window.dispatchEvent(new Event('resize'));
-            if (!statusElement.classList.contains('error') && !/^Henter /.test(statusElement.textContent)) status();
+            if (!statusElement.classList.contains('error')) status();
           }, 300);
         }
       },
       printErr: text => console.error(text),
       setStatus: text => { if (text) console.log(text); }
     };
+    // An engine that stops must not leave the page looking like it is still starting
+    window.addEventListener('error', event => status('Spillmotoren stoppet: ' + (event.message || 'ukjent feil'), true));
+    window.addEventListener('unhandledrejection', event => {
+      if (!statusElement.classList.contains('error')) status('Spillmotoren stoppet: ' + (event.reason?.message || event.reason || 'ukjent feil'), true);
+    });
     const script = document.createElement('script');
     script.src = new URL('scummvm.js', baseURL).href;
     script.onerror = () => status('Spillmotoren kunne ikke lastes. Last siden på nytt.', true);

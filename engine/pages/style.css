@@ -17,6 +17,10 @@ button.link { padding: 0; border: 0; background: none; color: #d8b878; font-weig
 .file input { display: block; margin-top: .4rem; font-size: .8rem; }
 #status { position: absolute; z-index: 3; left: 50%; bottom: 1.5rem; transform: translateX(-50%); max-width: 90%; padding: .55rem .9rem; border-radius: 5px; text-align: center; font-size: .85rem; color: #ddd; background: rgba(0, 0, 0, .75); pointer-events: none; }
 #status.error { color: #fff; background: #8a1f1f; }
+#loading { position: absolute; inset: 0; z-index: 2; display: flex; flex-direction: column; justify-content: center; align-items: center; gap: .9rem; padding: 2rem; background: #000; pointer-events: none; }
+#loading-text { font-size: 1.15rem; color: #e9e4da; text-align: center; }
+.bar { width: min(28rem, 80vw); height: .45rem; border-radius: 3px; background: #24302a; overflow: hidden; }
+#loading-bar { height: 100%; width: 0; background: #d8b878; }
 [hidden] { display: none !important; }
 .about { max-width: 750px; margin: 0 auto; padding: 2rem 1.25rem; line-height: 1.7; overflow-y: auto; height: 100%; }
 .about a { color: #d8b878; }
