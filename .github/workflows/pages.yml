@@ -1,0 +1,45 @@
+name: Bygg og publiser spillmotor
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - name: Filtester og personvern
+        run: node --test engine/pages/tests/*.test.mjs
+      - name: Byggepakker
+        run: sudo apt-get update && sudo apt-get install -y pkg-config zip xz-utils
+      - name: Bygg ScummVM med DigHD
+        run: JOBS=2 engine/build-web.sh
+      - name: Pakk bare motor, temaer og kildekode
+        run: python3 engine/build-pages.py
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: out/pages
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/configure-pages@v5
+      - uses: actions/deploy-pages@v4
+        id: deployment

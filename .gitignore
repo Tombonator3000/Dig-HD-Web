@@ -1,0 +1,6 @@
+out/
+engine/emsdk/
+engine/scummvm-web/
+__pycache__/
+*.pyc
+work/
