@@ -1,4 +1,4 @@
-import {LocalLibrary, makeIndexes, privateFetch} from './local-files.mjs';
+import {LocalLibrary, makeIndexes, privateFetch, summarize} from './local-files.mjs';
 
 const baseURL = new URL('./', location.href);
 const library = new LocalLibrary(baseURL.pathname);
@@ -23,7 +23,12 @@ function refresh() {
     if (!item) {
       element.textContent = kind === 'game' ? 'Ingen spillfiler valgt' : 'Ingen HD-pakke valgt';
     } else if (kind === 'mod') {
-      element.textContent = item.rooms + ' HD-rom klare · ' + Math.round(item.bytes / 1048576) + ' MB';
+      // Counted from the file list, so a pack chosen before the counts existed shows them too.
+      const sum = summarize(item.files, item.created);
+      const parts = [sum.rooms + ' HD-rom'];
+      if (sum.objects) parts.push(sum.objects + ' objektbilder');
+      if (sum.cels) parts.push(sum.cels + ' figurruter');
+      element.textContent = parts.join(', ') + ' · ' + Math.round(sum.bytes / 1048576) + ' MB' + (sum.created ? ' · laget ' + sum.created : '');
     } else {
       const paths = new Set(item.files.map(file => file.path.split('/').at(-1)));
       element.textContent = 'Spillfiler klare · ' + (paths.has('DIGMUSIC.BUN') ? 'musikk' : 'uten musikk') + ' · ' + (paths.has('DIGVOICE.BUN') ? 'tale' : 'uten tale');

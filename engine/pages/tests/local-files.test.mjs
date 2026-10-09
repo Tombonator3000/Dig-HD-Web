@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {selectFiles, makeIndexes, privateFetch, GAME_ROOT, MOD_ROOT} from '../local-files.mjs';
+import {selectFiles, makeIndexes, privateFetch, summarize, GAME_ROOT, MOD_ROOT} from '../local-files.mjs';
 
 const file = (name, content = 'sample') => ({name: name.split('/').at(-1), webkitRelativePath: name, size: content.length});
 
@@ -15,6 +15,20 @@ test('HD references and prompts are excluded; an incomplete mod is rejected', ()
   assert.equal(rows.length, 3);
   assert.throws(() => selectFiles([file('gpt/mod.json')], 'mod'), /HD-mappen/);
   assert.throws(() => selectFiles([file('gpt/mod.json'), file('gpt/rooms/room022.png'), file('gpt/rooms/room022.png')], 'mod'), /samme navn/);
+});
+
+test('HD objects and figure cels are imported and counted without their _idx files', () => {
+  const rows = selectFiles([
+    file('gpt/mod.json'), file('gpt/rooms/room022.png'), file('gpt/rooms/room022_idx.png'),
+    file('gpt/objects/obj097_0a.png'), file('gpt/objects/obj097_0a_idx.png'),
+    file('gpt/costumes/costume014_003.png'), file('gpt/costumes/costume014_003_idx.png'),
+    file('gpt/costumes/costume014_016.png'), file('gpt/costumes/costume014_016_idx.png'),
+    file('gpt/SHA256SUMS'), file('gpt/README.md')], 'mod');
+  assert.equal(rows.length, 9);
+  assert.ok(rows.some(row => row.path === MOD_ROOT + 'costumes/costume014_016_idx.png'));
+  const sum = summarize(rows, '2026-10-09 09:49');
+  assert.deepEqual([sum.rooms, sum.objects, sum.cels, sum.created], [1, 1, 2, '2026-10-09 09:49']);
+  assert.equal(sum.bytes, 9 * 'sample'.length);
 });
 
 test('ScummVM directory indexes combine local game/HD files with built-in themes', () => {

@@ -29,6 +29,19 @@ export function selectFiles(files, kind) {
   return [...selected.values()];
 }
 
+// What the page shows about a chosen folder. Counts the HD images, not the _idx files.
+export function summarize(rows, created = null) {
+  const count = re => rows.filter(row => re.test(row.path)).length;
+  return {
+    files: rows.map(({path, size}) => ({path, size})),
+    bytes: rows.reduce((sum, row) => sum + row.size, 0),
+    rooms: count(/\/rooms\/room\d+\.png$/),
+    objects: count(/\/objects\/obj\d+_[0-9a-fA-F]{2}\.png$/),
+    cels: count(/\/costumes\/costume\d+_\d+\.png$/),
+    created
+  };
+}
+
 export function makeIndexes(rows, staticRoot = {}) {
   const indexes = new Map([['/data/index.json', {...staticRoot}]]);
   for (const {path, size} of rows) {
@@ -83,12 +96,7 @@ export class LocalLibrary {
       if (mod.format !== 1 || mod.scale !== 4) throw new Error('HD-pakken må være i DigHD-format 1 med skala 4.');
     }
     const prefix = kind === 'game' ? GAME_ROOT : MOD_ROOT;
-    const metadata = {
-      files: rows.map(({path, size}) => ({path, size})),
-      bytes: rows.reduce((sum, row) => sum + row.size, 0),
-      rooms: rows.filter(row => /\/rooms\/room\d+\.png$/.test(row.path)).length,
-      created: mod?.created || null
-    };
+    const metadata = summarize(rows, mod?.created || null);
     await new Promise((resolve, reject) => {
       const tx = this.db.transaction(['files', 'metadata'], 'readwrite');
       tx.oncomplete = resolve;

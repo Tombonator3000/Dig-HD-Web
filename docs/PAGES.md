@@ -24,10 +24,17 @@ Ctrl+H bytter HD og klassisk, F5 åpner spillmenyen. Knappene øverst gjør det
 samme. Fullskjerm åpnes med knappen. `?rom=22` hopper til stranden for testing.
 `?klassisk=1` og `?gult=1` er også støttet.
 
-HD-pakken bruker 4x grafikk og jevn HD-tekst. Grafikk som ennå ikke finnes i
-pakken, vises oppskalert fra originalen. Filmer og figurer har derfor ikke
-automatisk nye malte HD-bilder. DIGMUSIC.BUN og DIGVOICE.BUN i spillmappen gir
-musikk og tale. Nettleseren viser om de mangler.
+HD-pakken bruker 4x grafikk og jevn HD-tekst. Rom, objekter og figurruter som
+har HD-bilder i pakken, vises i HD. Det som ennå ikke finnes i pakken (de fleste
+figurrutene og alle filmene), vises som originalen forstørret fire ganger.
+Etter at HD-mappen er valgt, viser siden hvor mange HD-rom, objektbilder og
+figurruter pakken har, og når den ble laget. Nettleseren bruker kopien den
+lagret sist, så en nyere HD-pakke må velges på nytt. DIGMUSIC.BUN og
+DIGVOICE.BUN i spillmappen gir musikk og tale. Nettleseren viser om de mangler.
+
+Testkrokene fra motoren kan settes i adressen. `?rom=22&DIGHD_TEST_COSTUME=14`
+setter Boston Low inn på stranden og viser alle animasjonene hans etter
+hverandre.
 
 ## Bygge fra kildekode
 
