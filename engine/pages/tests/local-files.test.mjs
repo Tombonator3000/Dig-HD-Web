@@ -24,16 +24,16 @@ test('HD objects and figure cels are imported and counted without their _idx fil
     file('gpt/costumes/costume014_003.png'), file('gpt/costumes/costume014_003_idx.png'),
     file('gpt/costumes/costume014_016.png'), file('gpt/costumes/costume014_016_idx.png'),
     file('gpt/costumes/costume014_016_hd.png'),
-    file('gpt/fonts/map.txt'), file('gpt/fonts/exo2/065.png'), file('gpt/fonts/OFL.txt'),
+    file('gpt/fonts/map.txt'), file('gpt/fonts/exo2.png'), file('gpt/fonts/exo2.txt'), file('gpt/fonts/OFL.txt'),
     file('gpt/SHA256SUMS'), file('gpt/README.md')], 'mod');
-  assert.equal(rows.length, 12);
+  assert.equal(rows.length, 13);
   assert.ok(rows.some(row => row.path === MOD_ROOT + 'fonts/map.txt'));
-  assert.ok(rows.some(row => row.path === MOD_ROOT + 'fonts/exo2/065.png'));
+  assert.ok(rows.some(row => row.path === MOD_ROOT + 'fonts/exo2.png'));
   assert.ok(rows.some(row => row.path === MOD_ROOT + 'costumes/costume014_016_hd.png'));
   assert.ok(rows.some(row => row.path === MOD_ROOT + 'costumes/costume014_016_idx.png'));
   const sum = summarize(rows, '2026-10-09 09:49');
   assert.deepEqual([sum.rooms, sum.objects, sum.cels, sum.created], [1, 1, 2, '2026-10-09 09:49']);
-  assert.equal(sum.bytes, 12 * 'sample'.length);
+  assert.equal(sum.bytes, 13 * 'sample'.length);
 });
 
 test('ScummVM directory indexes combine local game/HD files with built-in themes', () => {

@@ -197,10 +197,10 @@ index 21938706..3b478c6a 100644
  							hotspotX, hotspotY,
 diff --git a/engines/scumm/dighd.cpp b/engines/scumm/dighd.cpp
 new file mode 100644
-index 00000000..99274428
+index 00000000..5f73cb4b
 --- /dev/null
 +++ b/engines/scumm/dighd.cpp
-@@ -0,0 +1,3494 @@
+@@ -0,0 +1,3515 @@
 +/* ScummVM - Graphic Adventure Engine
 + *
 + * ScummVM is the legal property of its developers, whose names
@@ -2137,30 +2137,51 @@ index 00000000..99274428
 +	Common::String folder;
 +	if (!_faceOfFont.tryGetVal(font, folder))
 +		return -1;
-+	Common::FSNode node(_modPath.join(Common::String::format("fonts/%s/%03d.png", folder.c_str(), chr)));
-+	if (!node.exists())
++	if (!_faceLoaded.contains(folder)) {
++		// fonts/<folder>.png has all the letters, white with the coverage in
++		// alpha. fonts/<folder>.txt has a line "<chr> <x> <y> <w> <h>" for each.
++		// One file per typeface, so the web page fetches two files, not one per letter.
++		_faceLoaded[folder] = true;
++		Common::FSNode pngNode(_modPath.join(Common::String::format("fonts/%s.png", folder.c_str())));
++		Common::FSNode txtNode(_modPath.join(Common::String::format("fonts/%s.txt", folder.c_str())));
++		if (!pngNode.exists() || !txtNode.exists())
++			return -1;
++		::Image::PNGDecoder dec;
++		Common::SeekableReadStream *ps = pngNode.createReadStream();
++		const bool ok = ps && dec.loadStream(*ps);
++		delete ps;
++		if (!ok)
++			return -1;
++		const Graphics::Palette &pal = dec.getPalette();
++		Graphics::Surface *conv = dec.getSurface()->convertTo(_rgba, pal.size() ? pal.data() : nullptr, pal.size());
++		int count = 0;
++		if (Common::SeekableReadStream *in = txtNode.createReadStream()) {
++			while (!in->eos() && !in->err()) {
++				const Common::String line = in->readLine();
++				int c, x, y, w, h;
++				if (line.empty() || line[0] == '#' || sscanf(line.c_str(), "%d %d %d %d %d", &c, &x, &y, &w, &h) != 5)
++					continue;
++				if (w <= 0 || h <= 0 || x < 0 || y < 0 || x + w > conv->w || y + h > conv->h)
++					continue;
++				FaceGlyph fg;
++				fg.w = w;
++				fg.h = h;
++				fg.cov.resize(w * h);
++				for (int yy = 0; yy < h; yy++)
++					for (int xx = 0; xx < w; xx++)
++						fg.cov[yy * w + xx] = (*(const uint32 *)conv->getBasePtr(x + xx, y + yy) >> _rgba.aShift) & 0xFF;
++				_faceByName[Common::String::format("%s/%d", folder.c_str(), c)] = _faceGlyphs.size();
++				_faceGlyphs.push_back(fg);
++				count++;
++			}
++			delete in;
++		}
++		conv->free();
++		delete conv;
++		debug("DigHD: typeface %s, %d letters", folder.c_str(), count);
++	}
++	if (!_faceByName.tryGetVal(Common::String::format("%s/%d", folder.c_str(), chr), index))
 +		return -1;
-+	::Image::PNGDecoder dec;
-+	Common::SeekableReadStream *s = node.createReadStream();
-+	const bool ok = s && dec.loadStream(*s);
-+	delete s;
-+	if (!ok)
-+		return -1;
-+	const Graphics::Palette &pal = dec.getPalette();
-+	Graphics::Surface *conv = dec.getSurface()->convertTo(_rgba, pal.size() ? pal.data() : nullptr, pal.size());
-+	FaceGlyph fg;
-+	fg.w = conv->w;
-+	fg.h = conv->h;
-+	fg.cov.resize(fg.w * fg.h);
-+	for (int y = 0; y < fg.h; y++)
-+		for (int x = 0; x < fg.w; x++)
-+			fg.cov[y * fg.w + x] = (*(const uint32 *)conv->getBasePtr(x, y) >> _rgba.aShift) & 0xFF;
-+	conv->free();
-+	delete conv;
-+	if (!fg.w || !fg.h)
-+		return -1;
-+	index = _faceGlyphs.size();
-+	_faceGlyphs.push_back(fg);
 +	_faceIndex[key] = index;
 +	return index;
 +}
@@ -3697,10 +3718,10 @@ index 00000000..99274428
 +} // End of namespace Scumm
 diff --git a/engines/scumm/dighd.h b/engines/scumm/dighd.h
 new file mode 100644
-index 00000000..5aa37258
+index 00000000..d1d0e8f8
 --- /dev/null
 +++ b/engines/scumm/dighd.h
-@@ -0,0 +1,484 @@
+@@ -0,0 +1,486 @@
 +/* ScummVM - Graphic Adventure Engine
 + *
 + * ScummVM is the legal property of its developers, whose names
@@ -4031,6 +4052,8 @@ index 00000000..5aa37258
 +	bool _faceMapLoaded = false;
 +	Common::HashMap<int, Common::String> _faceOfFont;  // game font -> typeface folder
 +	Common::HashMap<uint32, int> _faceIndex;            // font << 8 | chr -> _faceGlyphs, -1 = none
++	Common::HashMap<Common::String, bool> _faceLoaded;  // typeface folders read (atlas)
++	Common::HashMap<Common::String, int> _faceByName;   // "folder/chr" -> _faceGlyphs
 +	Common::Array<FaceGlyph> _faceGlyphs;
 +	Common::HashMap<uint64, bool> _faceFailed;          // glyph shapes the typeface cannot draw
 +	int glyphStyle(int shape, const byte *pal);
