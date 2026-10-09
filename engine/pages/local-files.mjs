@@ -1,6 +1,17 @@
-// Local game/HD files stay in IndexedDB. Only the ScummVM engine is downloaded.
+// The game and the HD pack never come from this site. They are read from the
+// owner's private GitHub repository with his own read-only key, or from folders
+// on this machine, and kept in IndexedDB. Only the ScummVM engine is downloaded
+// from the site.
 export const GAME_ROOT = '/data/games/dig/';
 export const MOD_ROOT = '/data/mods/gpt/';
+
+// The private repository and the branches the files come from
+export const REPO = 'Tombonator3000/Dig-HD-Remake';
+export const SOURCES = [
+  {branch: 'spilldata', prefix: 'game/', kind: 'game'},
+  {branch: 'hd-mod', prefix: '', kind: 'mod'}
+];
+const API = 'https://api.github.com/repos/' + REPO + '/';
 
 export function selectFiles(files, kind) {
   const root = kind === 'game' ? GAME_ROOT : MOD_ROOT;
@@ -59,6 +70,94 @@ export function makeIndexes(rows, staticRoot = {}) {
   return indexes;
 }
 
+// A git tree listing as rows for makeIndexes(), with the same rules as a chosen folder
+export function treeRows(tree, prefix, kind) {
+  const files = tree
+    .filter(item => item.type === 'blob' && item.path.startsWith(prefix))
+    .map(item => ({name: item.path.split('/').at(-1), webkitRelativePath: 'repo/' + item.path.slice(prefix.length), size: item.size, sha: item.sha}));
+  return selectFiles(files, kind).map(row => ({path: row.path, size: row.size, sha: row.blob.sha}));
+}
+
+export class ApiError extends Error {
+  constructor(status, message) {
+    super(message);
+    this.status = status;
+  }
+}
+
+function apiError(status) {
+  if (status === 401) return new ApiError(status, 'GitHub godtar ikke nøkkelen. Lag en ny og lim den inn.');
+  if (status === 403 || status === 404) return new ApiError(status, 'Nøkkelen har ikke lesetilgang til ' + REPO + '.');
+  return new ApiError(status, 'GitHub svarte ' + status + '. Prøv igjen litt senere.');
+}
+
+// Reads a response while telling how far it has come; big files show progress.
+async function readBody(response, size, progress) {
+  if (!response.body || !progress || size < 4 * 1048576) return response.blob();
+  const reader = response.body.getReader();
+  const chunks = [];
+  let done = 0;
+  for (;;) {
+    const part = await reader.read();
+    if (part.done) break;
+    chunks.push(part.value);
+    done += part.value.length;
+    progress(done, size);
+  }
+  progress(size, size);
+  return new Blob(chunks);
+}
+
+// The files from the private branches, fetched when the engine asks for them
+// and kept by git blob id, so a new HD pack only fetches what has changed.
+export class RemoteSource {
+  constructor(library, token, networkFetch, progress = null) {
+    this.library = library;
+    this.token = token;
+    this.fetch = networkFetch;
+    this.progress = progress;
+    this.rows = new Map();
+  }
+
+  api(path, accept, cache = 'default') {
+    return this.fetch(API + path, {headers: {Authorization: 'Bearer ' + this.token, Accept: accept}, cache});
+  }
+
+  // The file lists of both branches. Offline, the last list is used.
+  async list() {
+    let rows = [];
+    try {
+      for (const source of SOURCES) {
+        const response = await this.api('git/trees/' + source.branch + '?recursive=1', 'application/vnd.github+json', 'no-store');
+        if (!response.ok) throw apiError(response.status);
+        const data = await response.json();
+        if (data.truncated) throw new Error('Fillisten fra GitHub ble avkortet.');
+        rows.push(...treeRows(data.tree, source.prefix, source.kind));
+      }
+      await this.library.setMeta('listing', rows);
+    } catch (error) {
+      const saved = error instanceof TypeError ? await this.library.getMeta('listing') : null;
+      if (!saved) throw error;
+      rows = saved;
+    }
+    this.rows = new Map(rows.map(row => [row.path, row]));
+    return rows;
+  }
+
+  async read(path) {
+    const row = this.rows.get(path);
+    if (!row) return undefined;
+    const cached = await this.library.getBlob(row.sha);
+    if (cached) return cached;
+    const response = await this.api('git/blobs/' + row.sha, 'application/vnd.github.raw+json');
+    if (!response.ok) throw apiError(response.status);
+    const name = path.split('/').at(-1);
+    const blob = await readBody(response, row.size, this.progress && ((done, size) => this.progress(name, done, size)));
+    await this.library.putBlob(row.sha, blob);
+    return blob;
+  }
+}
+
 function requestResult(request) {
   return new Promise((resolve, reject) => {
     request.onsuccess = () => resolve(request.result);
@@ -75,10 +174,13 @@ export class LocalLibrary {
   }
 
   async open() {
-    const request = indexedDB.open(this.name, 1);
+    const request = indexedDB.open(this.name, 2);
     request.onupgradeneeded = () => {
-      request.result.createObjectStore('files', {keyPath: 'path'});
-      request.result.createObjectStore('metadata');
+      const db = request.result;
+      // files: chosen folders; blobs: files from GitHub by blob id
+      if (!db.objectStoreNames.contains('files')) db.createObjectStore('files', {keyPath: 'path'});
+      if (!db.objectStoreNames.contains('metadata')) db.createObjectStore('metadata');
+      if (!db.objectStoreNames.contains('blobs')) db.createObjectStore('blobs');
     };
     this.db = await requestResult(request);
     this.db.onversionchange = () => this.db.close();
@@ -117,20 +219,46 @@ export class LocalLibrary {
     return row?.blob;
   }
 
+  getMeta(key) {
+    return requestResult(this.db.transaction('metadata').objectStore('metadata').get(key));
+  }
+
+  setMeta(key, value) {
+    const store = this.db.transaction('metadata', 'readwrite').objectStore('metadata');
+    return requestResult(value === undefined ? store.delete(key) : store.put(value, key));
+  }
+
+  getBlob(sha) {
+    return requestResult(this.db.transaction('blobs').objectStore('blobs').get(sha));
+  }
+
+  putBlob(sha, blob) {
+    return requestResult(this.db.transaction('blobs', 'readwrite').objectStore('blobs').put(blob, sha));
+  }
+
+  // Removes files an older HD pack had, but the current one does not
+  async pruneBlobs(keep) {
+    const store = this.db.transaction('blobs', 'readwrite').objectStore('blobs');
+    const keys = await requestResult(store.getAllKeys());
+    await Promise.all(keys.filter(key => !keep.has(key)).map(key => requestResult(store.delete(key))));
+  }
+
   async clear() {
     await new Promise((resolve, reject) => {
-      const tx = this.db.transaction(['files', 'metadata'], 'readwrite');
+      const tx = this.db.transaction(['files', 'metadata', 'blobs'], 'readwrite');
       tx.oncomplete = resolve;
       tx.onerror = () => reject(tx.error);
       tx.onabort = () => reject(tx.error || new Error('Slettingen ble avbrutt.'));
       tx.objectStore('files').clear();
       tx.objectStore('metadata').clear();
+      tx.objectStore('blobs').clear();
     });
     this.metadata = {};
   }
 }
 
-export function privateFetch(library, indexes, baseURL, networkFetch) {
+// source: LocalLibrary (chosen folders) or RemoteSource (the private branches)
+export function privateFetch(source, indexes, baseURL, networkFetch) {
   return async (input, options) => {
     const url = new URL(typeof input === 'string' || input instanceof URL ? input : input.url, baseURL);
     if (url.origin !== baseURL.origin || !url.pathname.startsWith('/data/')) return networkFetch(input, options);
@@ -141,7 +269,7 @@ export function privateFetch(library, indexes, baseURL, networkFetch) {
       return new Response(JSON.stringify(indexes.get(path)), {headers});
     }
     if (path.startsWith(GAME_ROOT) || path.startsWith('/data/mods/')) {
-      const blob = await library.read(path);
+      const blob = await source.read(path);
       // Never send a game/HD filename to GitHub or another server, even if missing.
       return new Response(blob || null, {status: blob ? 200 : 404, headers});
     }

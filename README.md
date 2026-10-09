@@ -4,7 +4,7 @@ Nettlesermotor for The Dig med DigHD-støtte, på GitHub Pages:
 
 **https://tombonator3000.github.io/Dig-HD-Web/**
 
-Velg dine egne spillfiler og en kompatibel HD-pakke én gang. Nettleseren husker dem lokalt. Ingen spillfiler eller HD-bilder følger nettsiden eller sendes til en server.
+Siden går rett inn i spillet. Første gang ber den om en lesenøkkel til eierens private repo, der spillet og HD-pakken ligger; filene hentes derfra ved behov og lagres i nettleseren. Mapper på maskinen virker også. Ingen spillfiler eller HD-bilder ligger på nettsiden eller sendes hit. HD eller originalgrafikk velges i spillets egen meny (F5, HD Graphics).
 
 Motoren bruker ScummVM med DigHD-patchen, med 4x HD-grafikk der pakken har slike bilder, og jevn HD-tekst. Originale spillregler og skript er bevart. Grafikk som mangler i pakken, vises oppskalert fra originalen.
 

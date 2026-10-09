@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {selectFiles, makeIndexes, privateFetch, summarize, GAME_ROOT, MOD_ROOT} from '../local-files.mjs';
+import {selectFiles, makeIndexes, privateFetch, summarize, treeRows, RemoteSource, ApiError, REPO, GAME_ROOT, MOD_ROOT} from '../local-files.mjs';
 
 const file = (name, content = 'sample') => ({name: name.split('/').at(-1), webkitRelativePath: name, size: content.length});
 
@@ -50,4 +50,91 @@ test('private data and missing private files never reach the network; themes use
   assert.deepEqual(requests, []);
   assert.equal(await (await fetch('/data/scummmodern.zip')).text(), 'network');
   assert.deepEqual(requests, ['https://example.github.io/Dig-HD-Web/data/scummmodern.zip']);
+});
+
+const tree = [
+  {path: 'README.md', type: 'blob', sha: 'r', size: 10},
+  {path: 'game', type: 'tree', sha: 't'},
+  {path: 'game/DIG.LA0', type: 'blob', sha: 'a0', size: 5},
+  {path: 'game/DIG.LA1', type: 'blob', sha: 'a1', size: 7},
+  {path: 'game/VIDEO/SQ1.SAN', type: 'blob', sha: 's1', size: 9},
+  {path: 'game/SHA256SUMS', type: 'blob', sha: 'x', size: 3}
+];
+const modTree = [
+  {path: 'mod.json', type: 'blob', sha: 'm', size: 4},
+  {path: 'rooms/room022.png', type: 'blob', sha: 'r22', size: 6},
+  {path: 'costumes/costume014_003.png', type: 'blob', sha: 'c3', size: 8},
+  {path: 'SHA256SUMS', type: 'blob', sha: 'y', size: 3}
+];
+
+test('git tree listings become the same paths as chosen folders, with blob ids', () => {
+  assert.deepEqual(treeRows(tree, 'game/', 'game'), [
+    {path: GAME_ROOT + 'DIG.LA0', size: 5, sha: 'a0'},
+    {path: GAME_ROOT + 'DIG.LA1', size: 7, sha: 'a1'},
+    {path: GAME_ROOT + 'VIDEO/SQ1.SAN', size: 9, sha: 's1'}]);
+  assert.deepEqual(treeRows(modTree, '', 'mod').map(row => row.path),
+    [MOD_ROOT + 'mod.json', MOD_ROOT + 'rooms/room022.png', MOD_ROOT + 'costumes/costume014_003.png']);
+});
+
+function memoryLibrary() {
+  const blobs = new Map(), meta = new Map();
+  return {
+    blobs,
+    getBlob: async sha => blobs.get(sha),
+    putBlob: async (sha, blob) => { blobs.set(sha, blob); },
+    getMeta: async key => meta.get(key),
+    setMeta: async (key, value) => { meta.set(key, value); }
+  };
+}
+
+function github(requests, status = 200) {
+  return async (url, options) => {
+    requests.push({url: String(url), auth: options?.headers?.Authorization, accept: options?.headers?.Accept});
+    if (status !== 200) return new Response('{}', {status});
+    const u = new URL(url);
+    if (u.pathname.endsWith('/git/trees/spilldata')) return Response.json({tree, truncated: false});
+    if (u.pathname.endsWith('/git/trees/hd-mod')) return Response.json({tree: modTree, truncated: false});
+    if (u.pathname.includes('/git/blobs/')) return new Response('blob ' + u.pathname.split('/').at(-1));
+    return new Response('', {status: 404});
+  };
+}
+
+test('files come from the private branches with the key, once per blob id', async () => {
+  const requests = [];
+  const library = memoryLibrary();
+  const source = new RemoteSource(library, 'KEY', github(requests));
+  const rows = await source.list();
+  assert.equal(rows.length, 6);
+  assert.ok(requests.every(r => r.url.startsWith('https://api.github.com/repos/' + REPO + '/') && r.auth === 'Bearer KEY'));
+  assert.equal(await (await source.read(GAME_ROOT + 'DIG.LA1')).text(), 'blob a1');
+  assert.equal(await (await source.read(GAME_ROOT + 'DIG.LA1')).text(), 'blob a1');
+  assert.equal(requests.filter(r => r.url.includes('/git/blobs/a1')).length, 1);
+  assert.equal(requests.find(r => r.url.includes('/git/blobs/')).accept, 'application/vnd.github.raw+json');
+  assert.equal(await source.read(GAME_ROOT + 'DIGMUSIC.BUN'), undefined);
+  assert.equal(requests.length, 3);
+
+  // Offline: the last list is used, and kept files still work
+  const offline = new RemoteSource(library, 'KEY', async () => { throw new TypeError('Failed to fetch'); });
+  assert.equal((await offline.list()).length, 6);
+  assert.equal(await (await offline.read(GAME_ROOT + 'DIG.LA1')).text(), 'blob a1');
+});
+
+test('a key GitHub does not accept gives an error the page can show', async () => {
+  for (const status of [401, 404]) {
+    const source = new RemoteSource(memoryLibrary(), 'BAD', github([], status));
+    await assert.rejects(source.list(), error => error instanceof ApiError && error.status === status);
+  }
+});
+
+test('with the private branches, game paths never go to the site', async () => {
+  const requests = [];
+  const source = new RemoteSource(memoryLibrary(), 'KEY', github(requests));
+  const rows = await source.list();
+  const base = new URL('https://example.github.io/Dig-HD-Web/');
+  const site = [];
+  const fetch = privateFetch(source, makeIndexes(rows), base, async url => { site.push(String(url)); return new Response('x'); });
+  assert.equal(await (await fetch(GAME_ROOT + 'DIG.LA0')).text(), 'blob a0');
+  assert.equal((await fetch(GAME_ROOT + 'DIGVOICE.BUN')).status, 404);
+  assert.equal((await fetch(MOD_ROOT + 'rooms/room023.png')).status, 404);
+  assert.deepEqual(site, []);
 });

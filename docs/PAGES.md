@@ -9,32 +9,67 @@ localhost-løsningen med private filer fra maskinen.
 
 ## Spille
 
-1. Åpne nettsiden i en oppdatert Chrome, Edge eller Firefox.
-2. Velg spillmappen med DIG.LA0, DIG.LA1 og VIDEO.
-3. Velg HD-mappen med mod.json og rooms, vanligvis mods/gpt.
-4. Trykk **Spill med HD**.
+Siden går rett inn i spillet, som originalen: introen, så spillet. Det er ingen
+knapper eller menyer rundt spillet. Grafikkvalget ligger i spillets egen meny.
 
-Filene lagres i IndexedDB på brukerens maskin. Ingen spillfil eller HD-fil
-sendes til GitHub. Etter omlasting er filene klare uten nytt mappevalg.
-Lagring i ScummVM er separat og beholdes hvis man fjerner den lokale filpakken.
-Nettlesere kan slette lokal lagring ved lite ledig plass; da må mappene velges
-på nytt. Privatmodus kan gjøre lagringen midlertidig.
+Første gang ber siden om én ting: en lesenøkkel til det private repoet
+Tombonator3000/Dig-HD-Remake, der spillet (grenen `spilldata`) og HD-pakken
+(grenen `hd-mod`) ligger. Lag nøkkelen på
+https://github.com/settings/personal-access-tokens/new:
 
-Ctrl+H bytter HD og klassisk, F5 åpner spillmenyen. Knappene øverst gjør det
-samme. Fullskjerm åpnes med knappen. `?rom=22` hopper til stranden for testing.
-`?klassisk=1` og `?gult=1` er også støttet.
+- Repository access: Only select repositories, Dig-HD-Remake
+- Permissions: Contents, Read-only
+- Utløpsdato etter eget valg
 
-HD-pakken bruker 4x grafikk og jevn HD-tekst. Rom, objekter og figurruter som
-har HD-bilder i pakken, vises i HD. Det som ennå ikke finnes i pakken (de fleste
-figurrutene og alle filmene), vises som originalen forstørret fire ganger.
-Etter at HD-mappen er valgt, viser siden hvor mange HD-rom, objektbilder og
-figurruter pakken har, og når den ble laget. Nettleseren bruker kopien den
-lagret sist, så en nyere HD-pakke må velges på nytt. DIGMUSIC.BUN og
-DIGVOICE.BUN i spillmappen gir musikk og tale. Nettleseren viser om de mangler.
+Lim den inn og trykk **Spill**. Nøkkelen lagres bare i denne nettleseren
+(IndexedDB). Etterpå går siden rett inn i spillet hver gang.
 
-Testkrokene fra motoren kan settes i adressen. `?rom=22&DIGHD_TEST_COSTUME=14`
-setter Boston Low inn på stranden og viser alle animasjonene hans etter
-hverandre.
+Filene hentes fra GitHub når spillet trenger dem, med nøkkelen, og lagres i
+nettleseren etter git-blob-ID. Første start henter DIG.LA0, DIG.LA1 (88 MB) og
+introfilmen; siden viser hvor langt den har kommet for store filer. Rom, figurer
+og filmer hentes når spillet kommer til dem. Ved hver start hentes fillisten for
+de to grenene på nytt (to små forespørsler), så ny HD-grafikk i `hd-mod` kommer
+med av seg selv, og bare filene som er endret, hentes. Filer som den gamle
+HD-pakken hadde og den nye ikke har, slettes fra nettleseren etter 30 sekunder.
+Uten nett brukes fillisten og filene fra forrige gang.
+
+Ingen spillfil eller HD-fil ligger på nettsiden eller sendes dit. Forespørslene
+går bare til api.github.com for det private repoet. Nettsiden er offentlig, men
+uten nøkkel med tilgang til repoet kommer ingen videre enn til nøkkelfeltet.
+Alle Pages-sider under tombonator3000.github.io deler opprinnelse og dermed
+nettleserlagring, så nøkkelen skal bare ha lesetilgang til dette ene repoet.
+
+Grafikk: F5 åpner spillets meny. Der står **HD Graphics** med en
+avkrysningsboks under Text Speed: kryss gir HD, tom boks gir originalgrafikken.
+Valget lagres og gjelder neste gang. Ctrl+H bytter også.
+
+Mobil og nettbrett: første trykk gir fullskjerm og liggende skjerm (der
+nettleseren tillater det). Trykk med to fingre åpner menyen (F5), tre fingre
+hopper over en filmscene (Esc).
+
+Andre valg i adressen:
+
+- `?ny-nokkel` ber om en ny nøkkel (for eksempel når den gamle er utløpt; en
+  nøkkel GitHub avviser, gir også nøkkelfeltet igjen)
+- `?rom=22` hopper til stranden for testing, `?klassisk` og `?gult` som ellers
+- testkrokene fra motoren, for eksempel `?rom=22&DIGHD_TEST_COSTUME=14`, som
+  setter Boston Low inn på stranden og viser alle animasjonene hans
+
+Uten nøkkel kan spillet også kjøre fra mapper på maskinen: **Bruk heller mapper
+på denne maskinen** under nøkkelfeltet, så spillmappen (DIG.LA0, DIG.LA1, VIDEO)
+og HD-mappen (mod.json, rooms, vanligvis `mods/gpt`). Filene kopieres til
+nettleseren, og siden går rett inn i spillet etterpå. En nyere HD-pakke må da
+velges på nytt (`?ny-nokkel` viser feltet og lenken igjen).
+
+HD-pakken bruker 4x grafikk og jevn HD-tekst. Rom, objekter og figurruter med
+HD-bilde vises i HD. Det som ennå ikke finnes i pakken (de fleste figurrutene og
+alle filmene), vises som originalen forstørret fire ganger. DIGMUSIC.BUN og
+DIGVOICE.BUN gir musikk og tale; de ligger ikke i repoet, så spillet er uten
+lyd fra GitHub. Lagrede spill og scummvm.ini ligger i nettleserens lagring
+(IDBFS) og blir der selv om spillfilene slettes. Nettlesere kan slette lokal
+lagring ved lite ledig plass, og privatmodus kan gjøre lagringen midlertidig.
+
+Når spillet avsluttes fra menyen (Quit), viser siden **Spill igjen**.
 
 ## Bygge fra kildekode
 

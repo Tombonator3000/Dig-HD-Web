@@ -2,54 +2,37 @@
 <html lang="no">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#000000">
   <title>The Dig HD</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <header>
-    <a class="brand" href="./">THE DIG <span>HD</span></a>
-    <div id="controls" hidden>
-      <button id="hd-toggle" type="button">HD / klassisk</button>
-      <button id="menu" type="button">Spillmeny</button>
-      <button id="fullscreen" type="button">Fullskjerm</button>
+  <canvas id="canvas" tabindex="0" aria-label="The Dig"></canvas>
+
+  <!-- Bare første gang: nøkkelen til det private repoet. Etterpå går siden rett inn i spillet. -->
+  <form id="key" class="screen" hidden>
+    <h1>The Dig <span>HD</span></h1>
+    <p>Første gang trenger siden en lesenøkkel til det private repoet på GitHub. Den lagres bare i denne nettleseren. Etterpå går siden rett inn i spillet.</p>
+    <input id="token" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="github_pat_..." aria-label="Lesenøkkel fra GitHub">
+    <button type="submit">Spill</button>
+    <p id="key-error" class="error" hidden></p>
+    <p class="small">Lag nøkkelen på <a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noopener">github.com/settings/personal-access-tokens/new</a>: Repository access, Only select repositories, Dig-HD-Remake. Permissions, Contents, Read-only.</p>
+    <p class="small"><button type="button" id="folders-link" class="link">Bruk heller mapper på denne maskinen</button> · <a href="credits.html">Om motoren</a></p>
+    <div id="folders" hidden>
+      <label class="file">Spillmappen (DIG.LA0, DIG.LA1, VIDEO)<input id="game-files" type="file" webkitdirectory multiple></label>
+      <label class="file">HD-mappen (mod.json, rooms)<input id="mod-files" type="file" webkitdirectory multiple></label>
     </div>
-    <a href="credits.html" class="credits">Om motoren</a>
-  </header>
-  <main id="setup">
-    <div class="eyebrow">SPILL I NETTLESEREN</div>
-    <h1>En fremmed verden.<br>Et skarpere bilde.</h1>
-    <p class="lead">The Dig med HD-bakgrunner, HD-objekter og HD-figurer der pakken har dem, glattere tekst og de originale spillreglene.</p>
-    <div class="files">
-      <section>
-        <span class="number">01</span>
-        <h2>Spillfilene</h2>
-        <p>Velg mappen med DIG.LA0, DIG.LA1 og VIDEO. Musikk og tale tas med hvis de finnes.</p>
-        <label class="file-button" for="game-files">Velg spillmappe</label>
-        <input id="game-files" type="file" webkitdirectory multiple disabled>
-        <div id="game-state" class="file-state">Ingen spillfiler valgt</div>
-      </section>
-      <section>
-        <span class="number">02</span>
-        <h2>HD-grafikken</h2>
-        <p>Velg HD-mappen med mod.json og rooms. Bildene brukes på plass i det originale spillet. Kommer en nyere HD-pakke, velger du mappen på nytt.</p>
-        <label class="file-button" for="mod-files">Velg HD-mappe</label>
-        <input id="mod-files" type="file" webkitdirectory multiple disabled>
-        <div id="mod-state" class="file-state">Ingen HD-pakke valgt</div>
-      </section>
-    </div>
-    <div class="launch">
-      <button id="start" class="primary" type="button" disabled>Spill med HD</button>
-      <button id="clear" class="quiet" type="button" disabled>Fjern lokale filer</button>
-    </div>
-    <p class="privacy">Filene blir på denne maskinen og huskes i nettleseren. De lastes ikke opp. Neste gang kan du starte direkte.</p>
-    <p class="keys">Ctrl+H: HD / klassisk · F5: spillmeny · Høyreklikk: undersøk</p>
-  </main>
-  <div id="player" hidden>
-    <canvas id="canvas" tabindex="0" aria-label="The Dig HD"></canvas>
+  </form>
+
+  <div id="ended" class="screen" hidden>
+    <h1>The Dig <span>HD</span></h1>
+    <p>Spillet er avsluttet.</p>
+    <button type="button" id="again">Spill igjen</button>
   </div>
-  <div id="status" role="status" aria-live="polite">Sjekker lokale filer …</div>
+
+  <div id="status" role="status" aria-live="polite" hidden></div>
   <script type="module" src="player.mjs"></script>
 </body>
 </html>
