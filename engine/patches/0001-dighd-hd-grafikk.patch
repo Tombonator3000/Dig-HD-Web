@@ -197,10 +197,10 @@ index 21938706..3b478c6a 100644
  							hotspotX, hotspotY,
 diff --git a/engines/scumm/dighd.cpp b/engines/scumm/dighd.cpp
 new file mode 100644
-index 00000000..5f73cb4b
+index 00000000..52ac3a9c
 --- /dev/null
 +++ b/engines/scumm/dighd.cpp
-@@ -0,0 +1,3515 @@
+@@ -0,0 +1,3519 @@
 +/* ScummVM - Graphic Adventure Engine
 + *
 + * ScummVM is the legal property of its developers, whose names
@@ -420,7 +420,7 @@ index 00000000..5f73cb4b
 +
 +	// DIGHD_TEST_KEYS=400:ctrl+h,500:ctrl+shift+h presses keys at the given
 +	// frames, so the hotkeys can be tested without a keyboard. Keys: a to z,
-+	// f1 to f12, space and escape.
++	// 0 to 9, f1 to f12, space and escape.
 +	if (const char *keys = getenv("DIGHD_TEST_KEYS")) {
 +		Common::String all(keys);
 +		all.toLowercase();
@@ -437,6 +437,9 @@ index 00000000..5f73cb4b
 +			k.frame = atoi(item.substr(0, colon).c_str());
 +			if (name.size() == 1 && name[0] >= 'a' && name[0] <= 'z') {
 +				k.keycode = (Common::KeyCode)(Common::KEYCODE_a + (name[0] - 'a'));
++				k.ascii = name[0];
++			} else if (name.size() == 1 && name[0] >= '0' && name[0] <= '9') {
++				k.keycode = (Common::KeyCode)(Common::KEYCODE_0 + (name[0] - '0'));
 +				k.ascii = name[0];
 +			} else if (name.size() >= 2 && name[0] == 'f' && atoi(name.c_str() + 1) >= 1 && atoi(name.c_str() + 1) <= 12) {
 +				k.keycode = (Common::KeyCode)(Common::KEYCODE_F1 + atoi(name.c_str() + 1) - 1);
@@ -3360,14 +3363,15 @@ index 00000000..5f73cb4b
 +bool DigHD::handleKey(const Common::KeyState &kbd, bool repeat) {
 +	if (kbd.keycode != Common::KEYCODE_h)
 +		return false;
-+	if (kbd.hasFlags(Common::KBD_CTRL)) {
-+		if (!repeat)
-+			setClassic(!_classic);
-+		return true;
-+	}
++	// Ctrl+Shift+H first: hasFlags(KBD_CTRL) is also true when Shift is held
 +	if (kbd.hasFlags(Common::KBD_CTRL | Common::KBD_SHIFT)) {
 +		if (!repeat)
 +			setShowMissing(!_showMissing);
++		return true;
++	}
++	if (kbd.hasFlags(Common::KBD_CTRL)) {
++		if (!repeat)
++			setClassic(!_classic);
 +		return true;
 +	}
 +	return false;
