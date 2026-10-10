@@ -197,10 +197,10 @@ index 21938706..3b478c6a 100644
  							hotspotX, hotspotY,
 diff --git a/engines/scumm/dighd.cpp b/engines/scumm/dighd.cpp
 new file mode 100644
-index 00000000..52ac3a9c
+index 00000000..59af5f7e
 --- /dev/null
 +++ b/engines/scumm/dighd.cpp
-@@ -0,0 +1,3519 @@
+@@ -0,0 +1,3876 @@
 +/* ScummVM - Graphic Adventure Engine
 + *
 + * ScummVM is the legal property of its developers, whose names
@@ -364,6 +364,8 @@ index 00000000..52ac3a9c
 +		sscanf(pos, "%d,%d", &_testPosX, &_testPosY);
 +	_testClip = envInt("DIGHD_TEST_CLIP", 0);
 +	_debugSoft = envInt("DIGHD_DEBUG_SOFT", 0) != 0;
++	_logBlasts = envInt("DIGHD_DEBUG_BLAST", 0) != 0;
++	_logFace = envInt("DIGHD_DEBUG_FACE", 0) != 0;
 +	if (const char *walk = getenv("DIGHD_TEST_WALK"))
 +		sscanf(walk, "%d,%d", &_testWalkX, &_testWalkY);
 +	// DIGHD_TEST_OBJSTATE=884:2,886:1 puts these objects in these states after
@@ -494,10 +496,12 @@ index 00000000..52ac3a9c
 +	_coverSeq.resize(_w * _h);
 +	_coverSlot.resize(_w * _h);
 +	_softBase.resize(_w * _h);
++	_shade.resize(_w * _h);
 +	for (uint i = 0; i < _coverSeq.size(); i++)
 +		_coverSeq[i] = kCoverAll;
 +	memset(_coverSlot.data(), 0, _coverSlot.size() * sizeof(uint16));
 +	memset(_softBase.data(), 0, _softBase.size());
++	memset(_shade.data(), 0, _shade.size() * sizeof(uint16));
 +	memset(_shadow.data(), 0, _shadow.size());
 +	memset(_source.data(), 0, _source.size() * sizeof(uint32));
 +	memset(_cycleArea.data(), 0, _cycleArea.size());
@@ -709,7 +713,7 @@ index 00000000..52ac3a9c
 +	// One stable slot per object for the current room. The slot index is
 +	// stored per pixel, so slots are never moved or removed until the room changes.
 +	for (uint i = 0; i < _drawn.size(); i++) {
-+		if (_drawn[i].obj == obj) {
++		if (_drawn[i].obj == obj && !_drawn[i].blast) {
 +			_drawn[i].state = state;
 +			_drawn[i].x = x;
 +			_drawn[i].y = y;
@@ -719,9 +723,121 @@ index 00000000..52ac3a9c
 +		}
 +	}
 +	if (_drawn.size() < 255) {
-+		DrawnObject d = { obj, state, x, y, img, ++_seq };
++		DrawnObject d = { obj, state, x, y, img, ++_seq, false };
 +		_drawn.push_back(d);
 +	}
++}
++
++int DigHD::blastSlot(int obj, int state, int width, int height) {
++	if (state <= 0)
++		return -1;
++	const uint32 key = ((uint32)obj << 8) | (uint32)state;
++	Image *img = nullptr;
++	if (!_objectImages.tryGetVal(key, img)) {
++		img = new Image();
++		Common::Path hd(Common::String::format("objects/obj%03d_%02X.png", obj, state));
++		Common::Path idx(Common::String::format("objects/obj%03d_%02X_idx.png", obj, state));
++		if (!loadImage(hd, idx, width, height, *img)) {
++			delete img;
++			img = nullptr;
++		}
++		_objectImages[key] = img;
++	}
++	if (!img)
++		return -1;
++	for (uint i = 0; i < _drawn.size(); i++) {
++		if (_drawn[i].blast && _drawn[i].obj == obj && _drawn[i].state == state)
++			return i;
++	}
++	if (_drawn.size() >= 255)
++		return -1;
++	DrawnObject d = { obj, state, 0, 0, img, ++_seq, true };
++	_drawn.push_back(d);
++	return _drawn.size() - 1;
++}
++
++void DigHD::beginBlast(VirtScreen *vs, int x, int y, int width, int height) {
++	_blastVs = nullptr;
++	if (!vs || vs->number != kMainVirtScreen)
++		return;
++	// The part of the object inside the buffer
++	const int x0 = MAX(x, 0), y0 = MAX(y, 0);
++	const int x1 = MIN(x + width, (int)vs->pitch), y1 = MIN(y + height, (int)vs->h);
++	if (x1 <= x0 || y1 <= y0)
++		return;
++	_blastVs = vs;
++	_blastX = x0;
++	_blastY = y0;
++	_blastW = x1 - x0;
++	_blastH = y1 - y0;
++	_blastPre.resize(_blastW * _blastH);
++	for (int r = 0; r < _blastH; r++)
++		memcpy(&_blastPre[r * _blastW], vs->getBasePtr(x0, y0 + r), _blastW);
++	// The rectangle the engine gave, for the object image's coordinates
++	_blastObjX = x;
++	_blastObjY = y;
++	_blastObjW = width;
++	_blastObjH = height;
++}
++
++void DigHD::endBlast(int obj, int state, int shadowMode, const byte *shadowPalette) {
++	VirtScreen *vs = _blastVs;
++	_blastVs = nullptr;
++	if (!vs)
++		return;
++	const byte *base = (const byte *)vs->getBasePtr(0, 0);
++	const size_t size = (size_t)vs->pitch * (vs->h + 8);
++	if (base != _blastBase || size != _blastSize || (int)vs->pitch != _blastPitch) {
++		_blastBase = base;
++		_blastSize = size;
++		_blastPitch = vs->pitch;
++		_blastMarks.resize(size);
++		memset(_blastMarks.data(), 0, size * sizeof(BlastMark));
++	}
++	const int slot = blastSlot(obj, state, _blastObjW, _blastObjH);
++	const Image *img = slot >= 0 ? _drawn[slot].image : nullptr;
++	int shaded = 0, painted = 0, hd = 0;
++	for (int r = 0; r < _blastH; r++) {
++		const byte *row = (const byte *)vs->getBasePtr(_blastX, _blastY + r);
++		for (int c = 0; c < _blastW; c++) {
++			const byte pre = _blastPre[r * _blastW + c], post = row[c];
++			if (pre == post)
++				continue;
++			BlastMark &m = _blastMarks[(size_t)(_blastY + r) * vs->pitch + _blastX + c];
++			m.gen = _blastGen;
++			m.pre = pre;
++			m.post = post;
++			m.slot = 0;
++			m.ox = m.oy = 0;
++			// Shadow mode 1 darkens through table 0, mode 3 through one of tables 0 to 7
++			// (bompApplyShadow1/3 in bomp.cpp)
++			bool shade = false;
++			if (shadowPalette && shadowMode == 1)
++				shade = shadowPalette[pre] == post;
++			else if (shadowPalette && shadowMode == 3)
++				for (int k = 0; k < 8 && !shade; k++)
++					shade = shadowPalette[pre + (k << 8)] == post;
++			if (shade) {
++				m.kind = kBlastShade;
++				shaded++;
++				continue;
++			}
++			painted++;
++			m.kind = kBlastPlain;
++			const int ox = _blastX + c - _blastObjX, oy = _blastY + r - _blastObjY;
++			if (img && ox >= 0 && oy >= 0 && ox < img->idx.w && oy < img->idx.h && ox < 2048 && oy < 2048 &&
++			    *((const byte *)img->idx.getBasePtr(ox, oy)) == post) {
++				m.kind = kBlastImage;
++				m.slot = slot;
++				m.ox = ox;
++				m.oy = oy;
++				hd++;
++			}
++		}
++	}
++	if (_logBlasts)
++		debug("DigHD: blast object %d state %d at %d,%d (%dx%d): %d shaded, %d painted, %d with HD", obj, state,
++		      _blastObjX, _blastObjY, _blastObjW, _blastObjH, shaded, painted, hd);
 +}
 +
 +DigHD::Image *DigHD::celImage(int costume, int cel, int width, int height) {
@@ -810,7 +926,7 @@ index 00000000..52ac3a9c
 +	if (c.soft)
 +		scheduleSoft(c);
 +	if (c.soft && _debugSoft)
-+		debug("DigHD: frame %u soft cel %d slot %d seq %u at %d,%d %dx%d", _frameNo, cel, (int)(&c - _cels), c.seq, c.rx, c.ry, c.rw, c.rh);
++		debug("DigHD: frame %u soft cel %d costume %d slot %d seq %u at %d,%d %dx%d", _frameNo, cel, c.costume, (int)(&c - _cels), c.seq, c.rx, c.ry, c.rw, c.rh);
 +}
 +
 +void DigHD::CelLayer::clear() {
@@ -1213,6 +1329,8 @@ index 00000000..52ac3a9c
 +	const bool celOn = mapping && _celMain.any && vbase == _celMain.base && _celMain.size == vsize &&
 +	                   pitch == _celMain.pitch && src >= vbase && textOff < _celMain.size;
 +	const CelMark *celMarks = celOn ? _celMain.mark.data() : nullptr;
++	const bool blastOn = mapping && !_blastMarks.empty() && vbase == _blastBase && _blastSize == vsize &&
++	                     pitch == _blastPitch && src >= vbase && textOff < _blastSize;
 +
 +	for (int r = 0; r < height; r++) {
 +		const int sy = y + r;
@@ -1237,9 +1355,32 @@ index 00000000..52ac3a9c
 +			uint32 coverSeq = kCoverAll;  // something other than a figure, until known
 +			uint16 coverSlot = 0;
 +			bool softBase = false;
++			uint16 shade = 0;
++			int blastKind = kBlastNone;
++
++			// A blast object over this pixel (the inventory): a darkened pixel is
++			// built from what is under it and tinted later (_shade); a painted
++			// pixel takes the object's HD image or stays the original
++			if (blastOn) {
++				const size_t off = textOff + (size_t)r * pitch + c;
++				if (off < _blastSize) {
++					const BlastMark &bm = _blastMarks[off];
++					if (bm.gen == _blastGen && bm.post == idx) {
++						blastKind = bm.kind;
++						if (bm.kind == kBlastShade) {
++							shade = (uint16)((bm.pre << 8) | idx);  // never 0: pre != post
++							idx = bm.pre;
++						} else if (bm.kind == kBlastImage) {
++							source = packObject(bm.slot, bm.ox, bm.oy);
++						}
++					}
++				}
++			}
 +			byte baseIdx = idx;
 +
-+			if (b && b[c] != idx) {
++			if (blastKind == kBlastImage || blastKind == kBlastPlain) {
++				// Painted by the blast object: source set above (or the original)
++			} else if (b && b[c] != idx) {
 +				// Something was drawn over the background. It is a figure if a cel
 +				// drew this pixel in its last drawing and the value is still the
 +				// cel's (under a glyph: the value under the glyph).
@@ -1279,7 +1420,7 @@ index 00000000..52ac3a9c
 +			} else if (b) {
 +				coverSeq = kCoverNone;
 +			}
-+			if (b && (b[c] == idx || softBase)) {
++			if (blastKind != kBlastImage && blastKind != kBlastPlain && b && (b[c] == idx || softBase)) {
 +				const int rx = vs->xstart + x + c;
 +				if (haveRoom && rx >= 0 && rx < roomW && ry >= 0 && ry < roomH &&
 +				    *((const byte *)_roomImage.idx.getBasePtr(rx, ry)) == baseIdx) {
@@ -1291,7 +1432,7 @@ index 00000000..52ac3a9c
 +					uint32 bestSeq = 0;
 +					for (uint i = 0; i < _drawn.size(); i++) {
 +						const DrawnObject &d = _drawn[i];
-+						if (!d.image || d.seq < bestSeq)
++						if (!d.image || d.blast || d.seq < bestSeq)
 +							continue;
 +						const int ox = rx - d.x, oy = ry - d.y;
 +						if (ox < 0 || oy < 0 || ox >= d.image->idx.w || oy >= d.image->idx.h)
@@ -1307,6 +1448,7 @@ index 00000000..52ac3a9c
 +			_shadow[sy * _w + sx] = f[c];
 +			_base[sy * _w + sx] = baseIdx;
 +			_softBase[sy * _w + sx] = softBase;
++			_shade[sy * _w + sx] = shade;
 +			_text[sy * _w + sx] = text;
 +			_source[sy * _w + sx] = source;
 +			setCover(sy * _w + sx, coverSeq, coverSlot);
@@ -1329,6 +1471,7 @@ index 00000000..52ac3a9c
 +			_source[sy * _w + sx] = kSrcFlat;
 +			_text[sy * _w + sx] = 0;
 +			_softBase[sy * _w + sx] = 0;
++			_shade[sy * _w + sx] = 0;
 +			setCover(sy * _w + sx, kCoverAll, 0);
 +		}
 +	}
@@ -1425,6 +1568,7 @@ index 00000000..52ac3a9c
 +			_text[r * _w + c] = glyph;
 +			_source[r * _w + c] = (!glyph && text && text[r * pitch + c]) ? kSrcFlat : picture;
 +			_softBase[r * _w + c] = 0;
++			_shade[r * _w + c] = 0;
 +			setCover(r * _w + c, kCoverAll, 0);
 +		}
 +
@@ -2193,26 +2337,162 @@ index 00000000..52ac3a9c
 +	// The letter is drawn with the HD typeface instead of being scaled from the
 +	// font image. It fills the box of the original letter's pixels, so it keeps
 +	// the size and place of the original and the layout of the text. The other
-+	// colour of the glyph is made from it the way the original has it: an
-+	// outline around the letter, or a shadow beside it. Glyphs with more colours
-+	// are drawn from the font image (returns false).
++	// colours of the glyph are made from it the way the original has them: an
++	// outline around the letter and/or a shadow beside it (up to two other
++	// colours, such as the white names with outline and shadow). Glyphs that do
++	// not fit this are drawn from the font image (returns false).
 +	const FaceGlyph &fg = _faceGlyphs[s.face];
 +	const int w = s.w, h = s.h, L = s.levels, n = _scale;
-+	if (L < 1 || L > 2)
++	if (L < 1 || L > 3) {
++		if (_logFace)
++			debug("DigHD: typeface not used for a glyph with %d colours (%dx%d)", L, w, h);
 +		return false;
++	}
 +	auto own = [&](int x, int y) { return (x < 0 || y < 0 || x >= w || y >= h) ? 0 : (int)s.lev[y * w + x]; };
-+	int fill = 1, other = 0;
-+	if (L == 2) {
-+		// The other colour is the one that lies most along the outside
-+		int outside[3] = { 0, 0, 0 };
++
++	// The letter's own colour: the one for which the other colours fit best
++	// as outline and shadow; on a tie, the one that lies least along the outside
++	int fill = 1;
++	float outsideFrac[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
++	bool present[4] = { false, false, false, false };
++	if (L >= 2) {
++		int outside[4] = { 0, 0, 0, 0 }, total[4] = { 0, 0, 0, 0 };
 +		for (int y = 0; y < h; y++)
 +			for (int x = 0; x < w; x++) {
 +				const int v = own(x, y);
-+				if (v && (!own(x - 1, y) || !own(x + 1, y) || !own(x, y - 1) || !own(x, y + 1)))
++				if (!v)
++					continue;
++				total[v]++;
++				if (!own(x - 1, y) || !own(x + 1, y) || !own(x, y - 1) || !own(x, y + 1))
 +					outside[v]++;
 +			}
-+		other = outside[2] >= outside[1] ? 2 : 1;
-+		fill = 3 - other;
++		for (int v = 1; v <= L; v++) {
++			present[v] = total[v] > 0;
++			if (total[v])
++				outsideFrac[v] = (float)outside[v] / total[v];
++		}
++	}
++	// How each other colour relates to what is drawn before it: a ring of one
++	// pixel around it (mode 1) or the same shape moved by one pixel (mode 2,
++	// shadow). With two other colours, the second is fitted to the letter and
++	// the first together (an outline with a shadow under both). Chosen by
++	// overlap with the original, which must be good.
++	// mode 2: moved by (dx, dy); mode 3: moved right and down (and diagonally
++	// when dy is 1), the soft shadow of the white names
++	struct Other { int colour, mode, dx, dy; float iou; };
++	auto fit = [&](const Common::Array<bool> &under, int colour, int ignore) {
++		Other o = { colour, 0, 0, 0, 0.0f };
++		auto in = [&](int x, int y) { return x >= 0 && y >= 0 && x < w && y < h && under[y * w + x]; };
++		const int shifts[][2] = { { 0, 0 }, { 1, 0 }, { 0, 1 }, { 1, 1 }, { -1, 0 }, { -1, 1 }, { 0, 1 }, { 0, 0 } };
++		for (int c = 0; c < 8; c++) {
++			int inter = 0, uni = 0;
++			for (int y = 0; y < h; y++)
++				for (int x = 0; x < w; x++) {
++					if (ignore && own(x, y) == ignore)
++						continue;  // a few pixels of a minor colour count for nothing
++					bool cand;
++					if (c == 0) {
++						bool near = false;
++						for (int dy = -1; dy <= 1 && !near; dy++)
++							for (int dx = -1; dx <= 1 && !near; dx++)
++								near = in(x + dx, y + dy);
++						cand = near && !in(x, y);
++					} else if (c >= 6) {
++						// right and down, with (c == 6) or without the diagonal
++						cand = !in(x, y) && (in(x - 1, y) || in(x, y - 1) || (c == 6 && in(x - 1, y - 1)));
++					} else {
++						cand = in(x - shifts[c][0], y - shifts[c][1]) && !in(x, y);
++					}
++					const bool hit = own(x, y) == colour;
++					inter += cand && hit;
++					uni += cand || hit;
++				}
++			float iou = uni ? (float)inter / uni : 0.0f;
++			// Shadows fall to the right: of two equal fits (a one pixel wide
++			// letter), the one with the shadow to the left loses
++			if (c == 4 || c == 5)
++				iou *= 0.95f;
++			if (iou > o.iou) {
++				o.iou = iou;
++				o.mode = c == 0 ? 1 : (c >= 6 ? 3 : 2);
++				o.dx = c >= 6 ? 1 : shifts[c][0];
++				o.dy = c == 6 ? 1 : (c == 7 ? 0 : shifts[c][1]);
++			}
++		}
++		return o;
++	};
++	auto plan = [&](int fill, Common::Array<Other> &others) {
++	Common::Array<bool> letter(w * h, false);
++	for (int i = 0; i < w * h; i++)
++		letter[i] = s.lev[i] == fill;
++	if (L == 2) {
++		others.push_back(fit(letter, 3 - fill, 0));
++	} else if (L == 3) {
++		int a = fill == 1 ? 2 : 1, b = 6 - fill - a;
++		int na = 0, nb = 0;
++		for (int i = 0; i < w * h; i++) {
++			na += s.lev[i] == a;
++			nb += s.lev[i] == b;
++		}
++		// A colour with only a few pixels (soft corners of a shadow) is left out
++		if (na <= MAX(3, nb / 6) || nb <= MAX(3, na / 6)) {
++			const int major = na > nb ? a : b, minor = na > nb ? b : a;
++			others.push_back(fit(letter, major, minor));
++			b = 0;
++		}
++		// Otherwise try both orders of the two other colours, keep the better
++		Common::Array<Other> bestPair;
++		float bestScore = -1.0f;
++		for (int order = 0; b && order < 2; order++) {
++			const int first = order ? b : a, second = order ? a : b;
++			const Other o1 = fit(letter, first, 0);
++			Common::Array<bool> both = letter;
++			for (int i = 0; i < w * h; i++)
++				both[i] = both[i] || s.lev[i] == first;
++			const Other o2 = fit(both, second, 0);
++			const float score = MIN(o1.iou, o2.iou);
++			if (score > bestScore) {
++				bestScore = score;
++				bestPair.clear();
++				bestPair.push_back(o1);
++				bestPair.push_back(o2);
++			}
++		}
++		if (b)
++			others = bestPair;
++	}
++	float score = 1.0f;
++	for (uint k = 0; k < others.size(); k++)
++		score = MIN(score, others[k].iou);
++	return score;
++	};
++	Common::Array<Other> others;
++	if (L >= 2) {
++		float bestScore = -1.0f, bestOut = 2.0f;
++		for (int v = 1; v <= L; v++) {
++			if (!present[v])
++				continue;
++			Common::Array<Other> cand;
++			const float sc = plan(v, cand);
++			if (sc > bestScore + 0.02f || (sc > bestScore - 0.02f && outsideFrac[v] < bestOut)) {
++				bestScore = MAX(sc, bestScore);
++				bestOut = outsideFrac[v];
++				fill = v;
++				others = cand;
++			}
++		}
++	}
++	if (_logFace) {
++		Common::String rows;
++		for (int y = 0; y < h; y++) {
++			rows += ' ';
++			for (int x = 0; x < w; x++)
++				rows += (char)('0' + s.lev[y * w + x]);
++		}
++		Common::String od;
++		for (uint k = 0; k < others.size(); k++)
++			od += Common::String::format(" [c%d m%d %d,%d %.2f]", others[k].colour, others[k].mode, others[k].dx, others[k].dy, others[k].iou);
++		debug("DigHD: typeface glyph %dx%d fill %d%s:%s", w, h, fill, od.c_str(), rows.c_str());
 +	}
 +	int fx0 = w, fy0 = h, fx1 = -1, fy1 = -1;
 +	for (int y = 0; y < h; y++)
@@ -2224,42 +2504,19 @@ index 00000000..52ac3a9c
 +	if (fx1 < 0)
 +		return false;
 +
-+	// How the other colour relates to the letter: a ring around it (mode 1) or
-+	// the letter moved by one pixel (mode 2, shadow). Chosen by overlap with the
-+	// original, which must be good.
-+	int mode = 0, sdx = 0, sdy = 0;
-+	if (other) {
-+		auto isFill = [&](int x, int y) { return own(x, y) == fill; };
-+		float best = 0.0f;
-+		const int shifts[][2] = { { 0, 0 }, { 1, 0 }, { 0, 1 }, { 1, 1 }, { -1, 0 }, { -1, 1 } };
-+		for (int c = 0; c < 6; c++) {
-+			int inter = 0, uni = 0;
-+			for (int y = 0; y < h; y++)
-+				for (int x = 0; x < w; x++) {
-+					bool cand;
-+					if (c == 0) {
-+						bool near = false;
-+						for (int dy = -1; dy <= 1 && !near; dy++)
-+							for (int dx = -1; dx <= 1 && !near; dx++)
-+								near = isFill(x + dx, y + dy);
-+						cand = near && !isFill(x, y);
-+					} else {
-+						cand = isFill(x - shifts[c][0], y - shifts[c][1]) && !isFill(x, y);
-+					}
-+					const bool o = own(x, y) == other;
-+					inter += cand && o;
-+					uni += cand || o;
++	for (uint k = 0; k < others.size(); k++) {
++		if (others[k].iou < 0.6f) {
++			if (_logFace) {
++				Common::String rows;
++				for (int y = 0; y < h; y++) {
++					rows += ' ';
++					for (int x = 0; x < w; x++)
++						rows += (char)('0' + s.lev[y * w + x]);
 +				}
-+			const float iou = uni ? (float)inter / uni : 0.0f;
-+			if (iou > best) {
-+				best = iou;
-+				mode = c == 0 ? 1 : 2;
-+				sdx = shifts[c][0];
-+				sdy = shifts[c][1];
++				debug("DigHD: typeface not used, outline or shadow unclear (best %.2f, %d colours, %dx%d, fill %d):%s", others[k].iou, L, w, h, fill, rows.c_str());
 +			}
-+		}
-+		if (best < 0.6f)
 +			return false;
++		}
 +	}
 +
 +	// The letter's coverage at the screen scale, fitted to the box of the
@@ -2268,10 +2525,18 @@ index 00000000..52ac3a9c
 +	Common::Array<float> cov(hw * hh, 0.0f);
 +	// The height of the box is kept. The width follows the typeface (the
 +	// screen is shown 1.2 times taller than its pixels, as the game is), so a
-+	// narrow letter is not stretched to the serifs of the pixel font. It is
-+	// centred in the box, and never wider than the box.
++	// narrow letter is not stretched to the serifs of the pixel font. A letter
++	// narrower than the box may be widened by up to a quarter, so the gaps
++	// next to narrow letters (r, f) shrink. It is centred in the box, and
++	// never wider than the box.
 +	const float boxW = (fx1 + 1 - fx0) * n, bh = (fy1 + 1 - fy0) * n, by0 = fy0 * n;
-+	const float bw = MIN(boxW, (float)fg.w * bh / fg.h * 1.2f);
++	// A letter one original pixel wide (l, i, !) fills its box, so it keeps the
++	// original's weight. A typeface letter too wide to be squeezed into one
++	// pixel (Exo 2's l has a foot) would become a thin grey line: the
++	// original letter is used instead (a plain bar, smooth when scaled).
++	if (fx1 == fx0 && fg.w * 10 > fg.h * 3)
++		return false;
++	const float bw = (fx1 == fx0) ? boxW : MIN(boxW, (float)fg.w * bh / fg.h * 1.2f * 1.25f);
 +	const float bx0 = fx0 * n + (boxW - bw) / 2;
 +	auto sample = [&](float u, float v) {
 +		// bilinear in the typeface image, 0 outside
@@ -2296,30 +2561,49 @@ index 00000000..52ac3a9c
 +			cov[y * hw + x] = acc / 16;
 +		}
 +
-+	// The other colour: a ring of one original pixel around the letter, or the
-+	// letter moved by one original pixel, where the letter is not
-+	Common::Array<float> oth(hw * hh, 0.0f);
-+	if (mode == 1) {
-+		const int r = n;
-+		for (int y = 0; y < hh; y++)
-+			for (int x = 0; x < hw; x++) {
-+				float m = 0.0f;
-+				for (int dy = -r; dy <= r; dy++)
-+					for (int dx = -r; dx <= r; dx++) {
-+						const int xx = x + dx, yy = y + dy;
-+						if (xx < 0 || yy < 0 || xx >= hw || yy >= hh || dx * dx + dy * dy > r * r + r)
-+							continue;
-+						m = MAX(m, cov[yy * hw + xx]);
++	// Each other colour from what is drawn before it (the letter, then the
++	// letter and the first other colour): a ring of one original pixel, or the
++	// shape moved by one original pixel, where nothing is drawn yet
++	Common::Array<float> drawn = cov;
++	Common::Array< Common::Array<float> > oth;
++	for (uint k = 0; k < others.size(); k++) {
++		const Other &o = others[k];
++		Common::Array<float> m(hw * hh, 0.0f);
++		if (o.mode == 1) {
++			const int r = n;
++			for (int y = 0; y < hh; y++)
++				for (int x = 0; x < hw; x++) {
++					float v = 0.0f;
++					for (int dy = -r; dy <= r; dy++)
++						for (int dx = -r; dx <= r; dx++) {
++							const int xx = x + dx, yy = y + dy;
++							if (xx < 0 || yy < 0 || xx >= hw || yy >= hh || dx * dx + dy * dy > r * r + r)
++								continue;
++							v = MAX(v, drawn[yy * hw + xx]);
++						}
++					m[y * hw + x] = MAX(0.0f, v - drawn[y * hw + x]);
++				}
++		} else {
++			// mode 2: one shift; mode 3: right, down and (dy 1) diagonal
++			const int sh[3][2] = { { o.dx, o.dy }, { 0, 1 }, { 1, 1 } };
++			const int count = o.mode == 3 ? (o.dy ? 3 : 2) : 1;
++			const int (*use)[2] = o.mode == 3 ? (const int (*)[2])sh : (const int (*)[2])sh;
++			for (int y = 0; y < hh; y++)
++				for (int x = 0; x < hw; x++) {
++					float v = 0.0f;
++					for (int t = 0; t < count; t++) {
++						const int ddx = o.mode == 3 ? (t == 0 ? 1 : use[t][0]) : use[t][0];
++						const int ddy = o.mode == 3 ? (t == 0 ? 0 : use[t][1]) : use[t][1];
++						const int xx = x - ddx * n, yy = y - ddy * n;
++						if (xx >= 0 && yy >= 0 && xx < hw && yy < hh)
++							v = MAX(v, drawn[yy * hw + xx]);
 +					}
-+				oth[y * hw + x] = MAX(0.0f, m - cov[y * hw + x]);
-+			}
-+	} else if (mode == 2) {
-+		for (int y = 0; y < hh; y++)
-+			for (int x = 0; x < hw; x++) {
-+				const int xx = x - sdx * n, yy = y - sdy * n;
-+				const float m = (xx >= 0 && yy >= 0 && xx < hw && yy < hh) ? cov[yy * hw + xx] : 0.0f;
-+				oth[y * hw + x] = MAX(0.0f, m - cov[y * hw + x]);
-+			}
++					m[y * hw + x] = MAX(0.0f, v - drawn[y * hw + x]);
++				}
++		}
++		for (int i = 0; i < hw * hh; i++)
++			drawn[i] = MIN(1.0f, drawn[i] + m[i]);
++		oth.push_back(m);
 +	}
 +
 +	s.hd.resize(hw * hh * kMaxGlyphLevels);
@@ -2329,12 +2613,18 @@ index 00000000..52ac3a9c
 +	for (int y = 0; y < hh; y++)
 +		for (int x = 0; x < hw; x++) {
 +			byte *o = s.hd.data() + (y * hw + x) * kMaxGlyphLevels;
-+			const int a = CLIP((int)(cov[y * hw + x] * 255.0f + 0.5f), 0, 255);
-+			const int b = other ? CLIP((int)(oth[y * hw + x] * 255.0f + 0.5f), 0, 255 - a) : 0;
++			int left = 255;
++			const int a = CLIP((int)(cov[y * hw + x] * 255.0f + 0.5f), 0, left);
 +			o[fill - 1] = a;
-+			if (other)
-+				o[other - 1] = b;
-+			if (a + b)
++			left -= a;
++			int sum = a;
++			for (uint k = 0; k < others.size(); k++) {
++				const int b = CLIP((int)(oth[k][y * hw + x] * 255.0f + 0.5f), 0, left);
++				o[others[k].colour - 1] = b;
++				left -= b;
++				sum += b;
++			}
++			if (sum)
 +				s.cover[(y / n) * w + x / n] = 1;
 +		}
 +	return true;
@@ -2618,7 +2908,7 @@ index 00000000..52ac3a9c
 +	const byte *roomNear = (anyCycled && _roomImage.valid()) ? nearCycleMask(_roomImage) : nullptr;
 +	const int roomW = _roomImage.idx.w;
 +
-+	bool anyText = false;
++	bool anyText = false, anyShade = false;
 +	for (int r = 0; r < height; r++) {
 +		const int sy = y + r;
 +		for (int c = 0; c < width; c++) {
@@ -2628,7 +2918,9 @@ index 00000000..52ac3a9c
 +			const bool glyph = !flatOnly && _text[sy * _w + sx];
 +			anyText |= glyph;
 +			// Under a soft cel the picture is built for the background under it
-+			const byte idx = (glyph || (!flatOnly && _softBase[sy * _w + sx])) ? _base[sy * _w + sx] : _shadow[sy * _w + sx];
++			// Under a blast object's shade the picture is built for what is under it (tinted below)
++			const byte idx = (glyph || (!flatOnly && (_softBase[sy * _w + sx] || _shade[sy * _w + sx]))) ? _base[sy * _w + sx] : _shadow[sy * _w + sx];
++			anyShade |= !flatOnly && _shade[sy * _w + sx];
 +			const uint32 src = _source[sy * _w + sx];
 +			const uint32 kind = src & kSrcMask;
 +			byte *out = _outBuf.data() + (r * n) * outPitch + (c * n) * bpp;
@@ -2789,6 +3081,41 @@ index 00000000..52ac3a9c
 +	if (!flatOnly && !_vm->isSmushActive())
 +		drawSoftCels(x, y, width, height);
 +
++	// A blast object's shade (the see-through inventory box): the HD picture
++	// under it, figures included, darkened like the original colour was
++	if (anyShade) {
++		for (int r = 0; r < height; r++) {
++			const int sy = y + r;
++			for (int c = 0; c < width; c++) {
++				const int sx = x + c;
++				const uint16 sh = _shade[sy * _w + sx];
++				if (!sh)
++					continue;
++				const byte *cur = _pal + (sh & 0xFF) * 3;  // the darkened colour shown
++				const byte *was = _pal + (sh >> 8) * 3;    // the colour it darkened
++				int f[3];
++				for (int k = 0; k < 3; k++)
++					f[k] = was[k] ? cur[k] * 256 / was[k] : -1;
++				byte *out = _outBuf.data() + (r * n) * outPitch + (c * n) * bpp;
++				for (int dy = 0; dy < n; dy++) {
++					byte *o = out + dy * outPitch;
++					for (int dx = 0; dx < n; dx++, o += bpp) {
++						const uint32 v = bpp == 4 ? READ_UINT32(o) : READ_UINT16(o);
++						byte cr, cg, cb;
++						_fmt.colorToRGB(v, cr, cg, cb);
++						const int ch[3] = { cr, cg, cb };
++						int t[3];
++						for (int k = 0; k < 3; k++)
++							t[k] = f[k] < 0 ? cur[k] : MIN(255, ch[k] * f[k] >> 8);
++						const uint32 col = _fmt.RGBToColor(t[0], t[1], t[2]);
++						if (bpp == 4) WRITE_UINT32(o, col); else WRITE_UINT16(o, col);
++					}
++				}
++				_statShade++;
++			}
++		}
++	}
++
 +	// HD glyphs over the blocks built above
 +	if (anyText) {
 +		for (int r = 0; r < height; r++) {
@@ -2858,13 +3185,14 @@ index 00000000..52ac3a9c
 +			const byte *sb = _softBase.data() + y * _w;
 +			const byte *bs = _base.data() + y * _w;
 +			int x = 0;
-+			while (x < left && !changed[sh[x]] && !ca[x] && !(sb[x] && changed[bs[x]]))
++			const uint16 *sd = _shade.data() + y * _w;
++			while (x < left && !changed[sh[x]] && !ca[x] && !((sb[x] || sd[x]) && changed[bs[x]]) && !(sd[x] && changed[sd[x] >> 8]))
 +				x++;
 +			if (x == _w)
 +				continue;
 +			left = MIN(left, x);
 +			x = _w - 1;
-+			while (x > right && !changed[sh[x]] && !ca[x] && !(sb[x] && changed[bs[x]]))
++			while (x > right && !changed[sh[x]] && !ca[x] && !((sb[x] || sd[x]) && changed[bs[x]]) && !(sd[x] && changed[sd[x] >> 8]))
 +				x--;
 +			right = MAX(right, x);
 +		}
@@ -2899,6 +3227,7 @@ index 00000000..52ac3a9c
 +				_source[y * _w + x] = kSrcFlat;
 +				_text[y * _w + x] = 0;
 +				_softBase[y * _w + x] = 0;
++				_shade[y * _w + x] = 0;
 +				setCover(y * _w + x, kCoverAll, 0);
 +			}
 +		}
@@ -3377,6 +3706,32 @@ index 00000000..52ac3a9c
 +	return false;
 +}
 +
++void DigHD::noteKey(Common::KeyState &kbd) {
++	const bool fkey = kbd.keycode >= Common::KEYCODE_F1 && kbd.keycode <= Common::KEYCODE_F12;
++	if (fkey || kbd.keycode == Common::KEYCODE_ESCAPE || kbd.keycode == Common::KEYCODE_h)
++		debug("DigHD: key %d, ascii %d, flags %d", (int)kbd.keycode, (int)kbd.ascii, (int)kbd.flags);
++	if (fkey && kbd.ascii != Common::ASCII_F1 + (kbd.keycode - Common::KEYCODE_F1)) {
++		const int old = kbd.ascii;
++		kbd.ascii = Common::ASCII_F1 + (kbd.keycode - Common::KEYCODE_F1);
++		debug("DigHD: F%d had ascii %d, set to %d", kbd.keycode - Common::KEYCODE_F1 + 1, old, (int)kbd.ascii);
++	}
++}
++
++bool DigHD::interceptQuit(const char *source) {
++	// The game's menu key (F5 in The Dig); the menu opens on the next poll
++	int menuKey = Common::ASCII_F5;
++	if (_vm->VAR_MAINMENU_KEY != 0xFF && _vm->_scummVars[_vm->VAR_MAINMENU_KEY] != 0)
++		menuKey = _vm->_scummVars[_vm->VAR_MAINMENU_KEY];
++	debug("DigHD: quit request (%s): the game's menu opens instead", source);
++	Common::Event ev;
++	ev.type = Common::EVENT_KEYDOWN;
++	ev.kbd = Common::KeyState(Common::KEYCODE_F5, menuKey, 0);
++	g_system->getEventManager()->pushEvent(ev);
++	ev.type = Common::EVENT_KEYUP;
++	g_system->getEventManager()->pushEvent(ev);
++	return true;
++}
++
 +void DigHD::setClassic(bool on, bool quiet) {
 +	_classic = on;
 +	debug("DigHD: %s graphics", on ? "classic" : "HD");
@@ -3414,6 +3769,8 @@ index 00000000..52ac3a9c
 +		s += Common::String::format(", figure px kept original %u", _statCelKept);  // part of original px
 +	if (_statSoft)
 +		s += Common::String::format(", soft figure px %u", _statSoft);  // laid over the pixels counted above
++	if (_statShade)
++		s += Common::String::format(", shaded px %u", _statShade);  // under a blast object's shade
 +	if (_showMissing)
 +		s += Common::String::format(", yellow px %u", _statMissing);
 +	if (_classic)
@@ -3716,16 +4073,16 @@ index 00000000..52ac3a9c
 +		}
 +	}
 +	_statRoom = _statObject = _statCel = _statSan = _statFlat = _statMissing = _statCycle = _statText = 0;
-+	_statCelTint = _statCelKept = _statSoft = 0;
++	_statCelTint = _statCelKept = _statSoft = _statShade = 0;
 +}
 +
 +} // End of namespace Scumm
 diff --git a/engines/scumm/dighd.h b/engines/scumm/dighd.h
 new file mode 100644
-index 00000000..d1d0e8f8
+index 00000000..dc9e14b8
 --- /dev/null
 +++ b/engines/scumm/dighd.h
-@@ -0,0 +1,486 @@
+@@ -0,0 +1,538 @@
 +/* ScummVM - Graphic Adventure Engine
 + *
 + * ScummVM is the legal property of its developers, whose names
@@ -3880,6 +4237,19 @@ index 00000000..d1d0e8f8
 +	void noteObject(int obj, int state, int x, int y, int width, int height);
 +
 +	/**
++	 * Blast objects (drawn over the screen by scripts, such as the inventory):
++	 * beginBlast() keeps the pixels under the object before it is drawn,
++	 * endBlast() compares them with what was drawn. A pixel the object darkened
++	 * through the shadow palette (the see-through inventory box) is built in HD
++	 * from what is under it and tinted the same way; a pixel the object painted
++	 * gets the object's HD image (objects/objNNN_SS.png) when there is one.
++	 * blastsRemoved(): the engine took the blast objects away (each frame).
++	 */
++	void beginBlast(VirtScreen *vs, int x, int y, int width, int height);
++	void endBlast(int obj, int state, int shadowMode, const byte *shadowPalette);
++	void blastsRemoved() { _blastGen++; }
++
++	/**
 +	 * An actor is about to be drawn (costume renderer), into the front buffer or
 +	 * the back buffer. zbuf: the z-plane mask the renderer uses (0 = none).
 +	 */
@@ -3901,6 +4271,21 @@ index 00000000..d1d0e8f8
 +	 * Returns true when the key was used here and must not reach the game.
 +	 */
 +	bool handleKey(const Common::KeyState &kbd, bool repeat);
++	/**
++	 * Called for every key press before anything else. Writes F keys, Esc and
++	 * H to the log (so a report from a real machine shows what arrived), and
++	 * gives F1 to F12 their usual ASCII codes when the backend left them out,
++	 * so F5 always opens the game's menu.
++	 */
++	void noteKey(Common::KeyState &kbd);
++	/**
++	 * A request to quit (Esc mapped to quit, window closed, Ctrl+Q, Alt+X or
++	 * Alt+Q) that did not come from the Quit button in the game's menu.
++	 * The Dig HD never quits straight to the desktop: the game's menu opens
++	 * instead, and quitting is done with its Quit button. Returns true when
++	 * the request was turned into the menu.
++	 */
++	bool interceptQuit(const char *source);
 +	/**
 +	 * Classic or HD graphics. The choice is saved as dighd_classic in the
 +	 * game's settings and used at the next start. quiet: no message on the
@@ -3972,7 +4357,17 @@ index 00000000..d1d0e8f8
 +		int obj, state, x, y;
 +		Image *image;
 +		uint32 seq;
++		bool blast;  // a blast object: not matched against the background
 +	};
++	struct BlastMark {
++		uint32 gen;   // _blastGen when drawn; older marks are gone
++		byte pre, post;
++		byte kind;    // kBlastShade, kBlastImage or kBlastPlain
++		byte slot;    // _drawn slot of the object image (kBlastImage)
++		uint16 ox, oy;
++	};
++	enum { kBlastNone = 0, kBlastShade = 1, kBlastImage = 2, kBlastPlain = 3 };
++	int blastSlot(int obj, int state, int width, int height);
 +
 +	bool loadImage(const Common::Path &hdFile, const Common::Path &idxFile, int origW, int origH, Image &out, bool pad = false);
 +	void loadRoom(int room);
@@ -3994,6 +4389,19 @@ index 00000000..d1d0e8f8
 +	Common::Array<uint32> _coverSeq;
 +	Common::Array<uint16> _coverSlot;
 +	Common::Array<byte> _softBase;
++	// Shaded by a blast object: 0, or (colour before << 8) | darkened colour shown
++	Common::Array<uint16> _shade;
++	Common::Array<BlastMark> _blastMarks;  // per byte of the main virtual screen
++	const byte *_blastBase = nullptr;
++	size_t _blastSize = 0;
++	int _blastPitch = 0;
++	uint32 _blastGen = 1;
++	Common::Array<byte> _blastPre;
++	VirtScreen *_blastVs = nullptr;
++	int _blastX = 0, _blastY = 0, _blastW = 0, _blastH = 0;
++	int _blastObjX = 0, _blastObjY = 0, _blastObjW = 0, _blastObjH = 0;
++	bool _logBlasts = false;  // DIGHD_DEBUG_BLAST
++	bool _logFace = false;    // DIGHD_DEBUG_FACE
 +	Common::Array<Common::Rect> _pendingSoft;  // screen areas to build again before the screen is shown
 +	void glyphOverCels(const GlyphDraw &g);
 +	void compose(int x, int y, int width, int height);
@@ -4205,6 +4613,7 @@ index 00000000..d1d0e8f8
 +	bool _skipVideo = false, _testDone = false, _verify = false, _forceFlat = false, _dumpFlat = false;
 +	uint32 _statRoom = 0, _statObject = 0, _statCel = 0, _statSan = 0, _statFlat = 0, _statMissing = 0, _statCycle = 0, _statText = 0;
 +	uint32 _statCelTint = 0, _statCelKept = 0;  // HD sprite px tinted, figure px with HD image kept original
++	uint32 _statShade = 0;  // pixels under a blast object's shade (inventory box), tinted HD
 +	uint32 _statSoft = 0;  // original px with a soft cel laid over them
 +	Common::String statText() const;
 +};
@@ -4475,7 +4884,7 @@ index 133f6ec0..d81d9f68 100644
  
  		drawBox(18,
 diff --git a/engines/scumm/input.cpp b/engines/scumm/input.cpp
-index 3525910f..3e0fa77b 100644
+index 3525910f..e799cd12 100644
 --- a/engines/scumm/input.cpp
 +++ b/engines/scumm/input.cpp
 @@ -28,6 +28,7 @@
@@ -4486,18 +4895,33 @@ index 3525910f..3e0fa77b 100644
  #include "scumm/dialogs.h"
  #include "scumm/insane/insane.h"
  #include "scumm/imuse/imuse.h"
-@@ -134,6 +135,10 @@ void ScummEngine::parseEvent(Common::Event event) {
+@@ -134,6 +135,13 @@ void ScummEngine::parseEvent(Common::Event event) {
  
  
  	case Common::EVENT_KEYDOWN:
 +		// Dig HD hotkeys (Ctrl+H, Ctrl+Shift+H) never reach the game
-+		if (_digHD && _digHD->handleKey(event.kbd, event.kbdRepeat))
-+			break;
++		if (_digHD) {
++			_digHD->noteKey(event.kbd);
++			if (_digHD->handleKey(event.kbd, event.kbdRepeat))
++				break;
++		}
 +
  		if (event.kbd.keycode >= Common::KEYCODE_0 && event.kbd.keycode <= Common::KEYCODE_9 &&
  			((event.kbd.hasFlags(Common::KBD_ALT) && canSaveGameStateCurrently()) ||
  			(event.kbd.hasFlags(Common::KBD_CTRL) && canLoadGameStateCurrently()))) {
-@@ -255,6 +260,11 @@ void ScummEngine::parseEvent(Common::Event event) {
+@@ -159,7 +167,10 @@ void ScummEngine::parseEvent(Common::Event event) {
+ 				quitGame();
+ 			}
+ 		} else if (event.kbd.hasFlags(Common::KBD_ALT) && event.kbd.keycode == Common::KEYCODE_q) {
+-			if (_game.version > 4 && _game.heversion == 0) {
++			if (_digHD) {
++				// Dig HD: never straight to the desktop, the game's menu opens
++				_digHD->interceptQuit("Alt+Q");
++			} else if (_game.version > 4 && _game.heversion == 0) {
+ 				quitGame();
+ 			}
+ 		} else {
+@@ -255,6 +266,11 @@ void ScummEngine::parseEvent(Common::Event event) {
  			_mouse.y -= _macScreenDrawOffset;
  		}
  
@@ -4509,6 +4933,22 @@ index 3525910f..3e0fa77b 100644
  		break;
  	case Common::EVENT_LBUTTONUP:
  		_leftBtnPressed &= ~msDown;
+@@ -293,6 +309,15 @@ void ScummEngine::parseEvent(Common::Event event) {
+ 		// event which was triggered by the keystroke. Clear the key.
+ 		clearClickedStatus();
+ 
++		// Dig HD: a request to quit that did not come from the menu's Quit
++		// button opens the game's menu instead of quitting
++		if (_digHD && isUsingOriginalGUI() && !_quitByGUIPrompt && !_mainMenuIsActive) {
++			getEventManager()->resetQuit();
++			getEventManager()->resetReturnToLauncher();
++			_digHD->interceptQuit(event.type == Common::EVENT_QUIT ? "quit event" : "return to launcher");
++			break;
++		}
++
+ 		if (isUsingOriginalGUI() &&
+ 			_game.platform != Common::kPlatformSegaCD &&
+ 			_game.platform != Common::kPlatformNES) {
 diff --git a/engines/scumm/module.mk b/engines/scumm/module.mk
 index b0f7e3eb..42985c9e 100644
 --- a/engines/scumm/module.mk
@@ -4600,7 +5040,7 @@ index 7dc15ebe..89e4eec7 100644
  	struct {
  		uint16 width;
 diff --git a/engines/scumm/object.cpp b/engines/scumm/object.cpp
-index 0e97ae97..eb0f5cb7 100644
+index 0e97ae97..05eb1747 100644
 --- a/engines/scumm/object.cpp
 +++ b/engines/scumm/object.cpp
 @@ -20,6 +20,7 @@
@@ -4621,9 +5061,16 @@ index 0e97ae97..eb0f5cb7 100644
  	x = 0xFFFF;
  
  	for (a = numstrip = 0; a < width; a++) {
-@@ -1865,7 +1869,12 @@ void ScummEngine_v6::drawBlastObject(BlastObject *eo) {
+@@ -1863,9 +1867,19 @@ void ScummEngine_v6::drawBlastObject(BlastObject *eo) {
+ 	bdd.actorPalette = nullptr;
+ 	bdd.mirror = false;
  
++	// Dig HD: what the object covers and what it drew (shade or HD image)
++	if (_digHD)
++		_digHD->beginBlast(vs, bdd.x, bdd.y, bdd.srcwidth, bdd.srcheight);
  	drawBomp(bdd);
++	if (_digHD)
++		_digHD->endBlast(eo->number, eo->image, bdd.shadowMode, bdd.shadowPalette);
  
 +	// Dig HD: the figures under the transparent pixels of the object stay
 +	if (_digHD)
@@ -4634,6 +5081,15 @@ index 0e97ae97..eb0f5cb7 100644
  }
  
  void ScummEngine_v6::removeBlastObjects() {
+@@ -1889,6 +1903,8 @@ void ScummEngine_v6::removeBlastObjects() {
+ 	}
+ 
+ 	_blastObjectQueuePos = 0;
++	if (_digHD)
++		_digHD->blastsRemoved();
+ }
+ 
+ void ScummEngine_v6::restoreBlastObjectsRects() {
 diff --git a/engines/scumm/palette.cpp b/engines/scumm/palette.cpp
 index a3758d7f..a95fd624 100644
 --- a/engines/scumm/palette.cpp
@@ -4680,6 +5136,70 @@ index d1d7a764..d28181c8 100644
  		}
  
  		updateCursor();
+diff --git a/engines/scumm/script.cpp b/engines/scumm/script.cpp
+index bd3c285c..0e09904f 100644
+--- a/engines/scumm/script.cpp
++++ b/engines/scumm/script.cpp
+@@ -1604,6 +1604,7 @@ void ScummEngine::beginCutscene(int *args) {
+ 
+ 	vm.cutSceneData[vm.cutSceneStackPointer] = args[0];
+ 	vm.cutSceneScript[vm.cutSceneStackPointer] = 0;
++	vm.cutSceneScriptNum[vm.cutSceneStackPointer] = 0;
+ 	vm.cutScenePtr[vm.cutSceneStackPointer] = 0;
+ 
+ 	vm.cutSceneScriptIndex = scr;
+@@ -1628,6 +1629,7 @@ void ScummEngine::endCutscene() {
+ 		ss->cutsceneOverride--;
+ 
+ 	vm.cutSceneScript[vm.cutSceneStackPointer] = 0;
++	vm.cutSceneScriptNum[vm.cutSceneStackPointer] = 0;
+ 	vm.cutScenePtr[vm.cutSceneStackPointer] = 0;
+ 
+ 	if (0 == vm.cutSceneStackPointer) {
+@@ -1656,6 +1658,15 @@ void ScummEngine::abortCutscene() {
+ 	assert(0 <= idx && idx < kMaxCutsceneNum);
+ 
+ 	uint32 offs = vm.cutScenePtr[idx];
++	// Dig HD: a cut scene whose script has already stopped cannot be skipped;
++	// starting that slot again at the saved offset runs a dead script and ends
++	// in a broken stack (assert in pop()), which quit the game to the desktop
++	const ScriptSlot &css = vm.slot[vm.cutSceneScript[idx]];
++	if (offs && (css.status == ssDead || (vm.cutSceneScriptNum[idx] && css.number != vm.cutSceneScriptNum[idx]))) {
++		debug("DigHD: Esc ignored, the cut scene's script %d has stopped", vm.cutSceneScriptNum[idx]);
++		vm.cutScenePtr[idx] = 0;
++		return;
++	}
+ 	if (offs) {
+ 		ScriptSlot *ss = &vm.slot[vm.cutSceneScript[idx]];
+ #ifdef USE_TTS
+@@ -1679,6 +1690,7 @@ void ScummEngine::beginOverride() {
+ 
+ 	vm.cutScenePtr[idx] = _scriptPointer - _scriptOrgPointer;
+ 	vm.cutSceneScript[idx] = _currentScript;
++	vm.cutSceneScriptNum[idx] = vm.slot[_currentScript].number;
+ 
+ 	// Skip the jump instruction following the override instruction
+ 	// (the jump is responsible for "skipping" cutscenes, and the reason
+@@ -1696,6 +1708,7 @@ void ScummEngine::endOverride() {
+ 
+ 	vm.cutScenePtr[idx] = 0;
+ 	vm.cutSceneScript[idx] = 0;
++	vm.cutSceneScriptNum[idx] = 0;
+ 
+ 	if (_game.version >= 4)
+ 		VAR(VAR_OVERRIDE) = 0;
+diff --git a/engines/scumm/script.h b/engines/scumm/script.h
+index a04ee6cb..d3571302 100644
+--- a/engines/scumm/script.h
++++ b/engines/scumm/script.h
+@@ -128,6 +128,7 @@ enum {
+ struct VirtualMachineState {
+ 	uint32 cutScenePtr[kMaxCutsceneNum];
+ 	byte cutSceneScript[kMaxCutsceneNum];
++	uint16 cutSceneScriptNum[kMaxCutsceneNum]; // Dig HD: script number at beginOverride, 0 = unknown (not saved)
+ 	int16 cutSceneData[kMaxCutsceneNum];
+ 	int16 cutSceneScriptIndex;
+ 	byte cutSceneStackPointer;
 diff --git a/engines/scumm/scumm.cpp b/engines/scumm/scumm.cpp
 index d1baa70b..8abc0a15 100644
 --- a/engines/scumm/scumm.cpp
