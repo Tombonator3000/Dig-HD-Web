@@ -10,7 +10,9 @@ localhost-løsningen med private filer fra maskinen.
 ## Spille
 
 Siden går rett inn i spillet, som originalen: introen, så spillet. Det er ingen
-knapper eller menyer rundt spillet. Grafikkvalget ligger i spillets egen meny.
+oppsettmenyer rundt spillet. **Meny · F5** nederst til høyre åpner spillets
+egen meny for Save/Load, og den fysiske F5-tasten gjør det samme.
+Grafikkvalget ligger også i spillets egen meny.
 
 Første gang ber siden om én ting: en lesenøkkel til repoet
 Tombonator3000/Dig-HD-Remake, der spillet (grenen `spilldata`) og HD-pakken
@@ -27,7 +29,10 @@ Lim den inn og trykk **Spill**. Nøkkelen lagres bare i denne nettleseren
 Filene hentes fra GitHub når spillet trenger dem, med nøkkelen, og lagres i
 nettleseren etter git-blob-ID. Første start henter DIG.LA0, DIG.LA1 (88 MB) og
 introfilmen; siden viser hvor langt den har kommet for store filer. Rom, figurer
-og filmer hentes når spillet kommer til dem. Ved hver start hentes fillisten for
+og filmer hentes når spillet kommer til dem. Når en figurrute eller et ikon
+trengs, forhåndslastes nærliggende ruter med inntil fire bakgrunnsnedlastinger
+og et avgrenset vindu på 48 filer / 8 MiB. Dette reduserer stopp mellom
+animasjonsruter uten å hente hele HD-pakken. Ved hver start hentes fillisten for
 de to grenene på nytt (to små forespørsler), så ny HD-grafikk i `hd-mod` kommer
 med av seg selv, og bare filene som er endret, hentes. Filer som den gamle
 HD-pakken hadde og den nye ikke har, slettes fra nettleseren etter 30 sekunder.
@@ -152,6 +157,9 @@ data/games fra distribusjonen. Kontroller build.json og filene før publisering.
 
 ```sh
 node --test engine/pages/tests/*.test.mjs
+python3 engine/tests/test-build-pages.py -v
+source engine/emsdk/emsdk_env.sh
+engine/tests/test-http-fs-cache.sh engine/scummvm-web
 python3 -m http.server 8000 --bind 127.0.0.1 --directory out
 ```
 

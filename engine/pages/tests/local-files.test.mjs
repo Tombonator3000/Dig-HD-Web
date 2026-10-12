@@ -189,3 +189,118 @@ test('a lost connection is tried again until the file comes', async () => {
   await assert.rejects(bad.read(GAME_ROOT + 'VIDEO/FONT1.NUT'), error => error.status === 401);
   assert.equal(rejected, 1);
 });
+
+const settlePrefetch = async source => {
+  const deadline = Date.now() + 2000;
+  while (source.prefetchActive || source.prefetchQueue.length) {
+    assert.ok(Date.now() < deadline, 'prefetch did not settle');
+    await new Promise(resolve => setTimeout(resolve, 1));
+  }
+};
+const animationRow = (costume, cel, suffix = '') => {
+  const sha = `c${costume}-${cel}${suffix}`;
+  return {path: MOD_ROOT + `costumes/costume${String(costume).padStart(3, '0')}_${String(cel).padStart(3, '0')}${suffix}.png`, sha, size: sha.length};
+};
+
+test('simultaneous reads share one IndexedDB lookup and one network download', async () => {
+  const library = memoryLibrary();
+  let lookups = 0, downloads = 0;
+  const getBlob = library.getBlob;
+  library.getBlob = sha => { lookups++; return getBlob(sha); };
+  const source = new RemoteSource(library, 'KEY', async () => {
+    downloads++;
+    await new Promise(resolve => setTimeout(resolve, 5));
+    return new Response('shared');
+  });
+  const path = GAME_ROOT + 'DIG.LA0';
+  source.rows.set(path, {path, sha: 'same', size: 6});
+  const blobs = await Promise.all([source.read(path), source.read(path), source.read(path)]);
+  assert.deepEqual(await Promise.all(blobs.map(blob => blob.text())), ['shared', 'shared', 'shared']);
+  assert.equal(lookups, 1);
+  assert.equal(downloads, 1);
+});
+
+test('new animation cels prefetch only the active costume, with four background workers', async () => {
+  const requests = [], blocked = [];
+  let releaseAll = false;
+  const rows = [0, 1, 2, 3, 4, 5, 6].flatMap(cel => [animationRow(14, cel), animationRow(14, cel, '_idx')]);
+  rows.push(animationRow(15, 0));
+  const demanded = rows[0];
+  const source = new RemoteSource(memoryLibrary(), 'KEY', async url => {
+    const sha = new URL(url).pathname.split('/').at(-1);
+    requests.push(sha);
+    if (sha !== demanded.sha && !releaseAll) await new Promise(resolve => blocked.push(resolve));
+    return new Response(sha);
+  });
+  source.rows = new Map(rows.map(row => [row.path, row]));
+  assert.equal(await (await source.read(demanded.path)).text(), demanded.sha);
+  await new Promise(resolve => setTimeout(resolve, 1));
+  assert.equal(source.prefetchActive, 4);
+  assert.equal(requests[0], demanded.sha);
+  assert.equal(requests.length, 5);
+  assert.ok(requests.every(sha => sha.startsWith('c14-')));
+
+  // An on-demand cel does not wait behind the speculative queue. Reading one
+  // already in flight shares its existing request instead of fetching twice.
+  const queued = rows.find(row => row.sha.startsWith('c14-') && !requests.includes(row.sha));
+  const urgent = source.read(queued.path);
+  await new Promise(resolve => setTimeout(resolve, 1));
+  assert.ok(requests.includes(queued.sha));
+  const active = rows.find(row => row.sha === requests[1]);
+  const shared = source.read(active.path);
+  releaseAll = true;
+  blocked.splice(0).forEach(resolve => resolve());
+  await Promise.all([urgent, shared]);
+  await settlePrefetch(source);
+  assert.equal(requests.length, 14);
+  assert.equal(new Set(requests).size, requests.length);
+  assert.equal(requests.includes('c15-0'), false);
+
+  // Warm animation reads use the saved blobs without more downloads.
+  for (const row of rows.slice(0, 14)) await source.read(row.path);
+  await settlePrefetch(source);
+  assert.equal(requests.length, 14);
+});
+
+test('inventory objects prefetch neighbours without pulling rooms or costumes', async () => {
+  const rows = [97, 98, 99].flatMap(id => ['', '_idx'].map(suffix => {
+    const sha = `o${id}${suffix}`;
+    return {path: MOD_ROOT + `objects/obj${id}_01${suffix}.png`, sha, size: sha.length};
+  }));
+  rows.push(animationRow(14, 0), {path: MOD_ROOT + 'rooms/room002.png', sha: 'room', size: 4});
+  const requests = [];
+  const source = new RemoteSource(memoryLibrary(), 'KEY', async url => {
+    const sha = new URL(url).pathname.split('/').at(-1);
+    requests.push(sha);
+    return new Response(sha);
+  });
+  source.rows = new Map(rows.map(row => [row.path, row]));
+  await source.read(rows[0].path);
+  await settlePrefetch(source);
+  assert.equal(requests.length, 6);
+  assert.ok(requests.every(sha => sha.startsWith('o')));
+});
+
+test('speculative failures stay quiet and requested files can still retry', async () => {
+  const rows = [animationRow(14, 0), animationRow(14, 1)];
+  let failed = true, waiting = 0;
+  const requests = [];
+  const source = new RemoteSource(memoryLibrary(), 'KEY', async url => {
+    const sha = new URL(url).pathname.split('/').at(-1);
+    requests.push(sha);
+    if (sha === rows[1].sha && failed) return new Response('', {status: 502});
+    return new Response(sha);
+  }, {waiting: () => waiting++, sleep: async () => {}});
+  source.rows = new Map(rows.map(row => [row.path, row]));
+  await source.read(rows[0].path);
+  await settlePrefetch(source);
+  assert.equal(waiting, 0);
+  assert.equal(requests.filter(sha => sha === rows[1].sha).length, 1);
+  // Drawing the same cel again does not repeatedly retry speculative work.
+  await source.read(rows[0].path);
+  await settlePrefetch(source);
+  assert.equal(requests.filter(sha => sha === rows[1].sha).length, 1);
+  failed = false;
+  assert.equal(await (await source.read(rows[1].path)).text(), rows[1].sha);
+  assert.equal(requests.filter(sha => sha === rows[1].sha).length, 2);
+});

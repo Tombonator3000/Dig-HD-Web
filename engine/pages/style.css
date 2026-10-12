@@ -25,3 +25,13 @@ button.link { padding: 0; border: 0; background: none; color: #d8b878; font-weig
 .about { max-width: 750px; margin: 0 auto; padding: 2rem 1.25rem; line-height: 1.7; overflow-y: auto; height: 100%; }
 .about a { color: #d8b878; }
 .about p { margin: 0 0 1rem; }
+#game-menu {
+  position: fixed;
+  right: max(10px, env(safe-area-inset-right));
+  bottom: max(10px, env(safe-area-inset-bottom));
+  z-index: 5;
+  padding: 6px 10px;
+  font-size: 13px;
+  opacity: .65;
+}
+#game-menu:hover, #game-menu:focus-visible { opacity: 1; }
