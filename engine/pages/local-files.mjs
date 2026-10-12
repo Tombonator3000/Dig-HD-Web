@@ -145,6 +145,14 @@ export class RemoteSource {
     this.waiting = waiting;
     this.sleep = sleep;
     this.rows = new Map();
+    this.inflight = new Map();
+    this.prefetched = new Set();
+    this.prefetchFailed = new Set();
+    this.prefetchQueue = [];
+    this.prefetchQueued = new Set();
+    this.prefetchActive = 0;
+    this.assetGroups = new Map();
+    this.groupRows = null;
   }
 
   api(path, accept, cache = 'default') {
@@ -205,26 +213,110 @@ export class RemoteSource {
     const blobs = [];
     let before = 0;
     for (const part of parts) {
-      blobs.push(await this.blob(part, name, before, row.size));
+      // The requested file starts first. Animation neighbours then download
+      // while it is on its way, rather than stopping each new animation cel.
+      const requested = this.blob(part, name, before, row.size);
+      this.prefetchNeighbours(path);
+      blobs.push(await requested);
       before += part.size;
     }
     return blobs.length === 1 ? blobs[0] : new Blob(blobs);
   }
 
   // One git blob, from the browser if it is there, else from GitHub
-  async blob({sha, size}, name, before, total) {
+  async blob(part, name, before, total, background = false) {
+    const {sha} = part;
+    if (!background) this.prefetchQueued.delete(sha);
+    const pending = this.inflight.get(sha);
+    if (pending) {
+      try {
+        return await pending.promise;
+      } catch (error) {
+        // Speculative work makes only one attempt. A requested file retains
+        // the normal retry behaviour even if that speculative attempt failed.
+        if (background || !pending.background) throw error;
+        if (this.inflight.get(sha) === pending) this.inflight.delete(sha);
+        return this.blob(part, name, before, total);
+      }
+    }
+    const entry = {background, promise: this.fetchBlob(part, name, before, total, background)};
+    this.inflight.set(sha, entry);
+    try {
+      const blob = await entry.promise;
+      this.prefetched.add(sha);
+      return blob;
+    } finally {
+      if (this.inflight.get(sha) === entry) this.inflight.delete(sha);
+    }
+  }
+
+  async fetchBlob({sha, size}, name, before, total, background) {
     const cached = await this.library.getBlob(sha);
     if (cached) return cached;
-    const progress = this.progress && ((done) => this.progress(name, before + done, total));
+    const progress = !background && this.progress && ((done) => this.progress(name, before + done, total));
     const blob = await this.retry(async () => {
       const response = await this.get('git/blobs/' + sha, 'application/vnd.github.raw+json');
       const body = await readBody(response, size, progress && total >= 4 * 1048576 ? progress : null);
       // A connection that breaks off can give a short body without an error
       if (body.size !== size) throw new TypeError('Filen kom ikke helt fram.');
       return body;
-    });
+    }, background ? 1 : Infinity);
     await this.library.putBlob(sha, blob);
     return blob;
+  }
+
+  prefetchNeighbours(path) {
+    const costume = path.match(/\/costumes\/(costume\d+)_\d+(?:_idx|_hd)?\.png$/)?.[1];
+    const group = costume || (/\/objects\/obj\d+_[0-9a-fA-F]{2}(?:_idx)?\.png$/.test(path) ? 'objects' : null);
+    if (!group) return;
+    if (this.groupRows !== this.rows) {
+      this.assetGroups.clear();
+      for (const row of this.rows.values()) {
+        const key = row.path.match(/\/costumes\/(costume\d+)_\d+(?:_idx|_hd)?\.png$/)?.[1] ||
+          (/\/objects\/obj\d+_[0-9a-fA-F]{2}(?:_idx)?\.png$/.test(row.path) ? 'objects' : null);
+        if (!key) continue;
+        if (!this.assetGroups.has(key)) this.assetGroups.set(key, []);
+        this.assetGroups.get(key).push(row);
+      }
+      for (const rows of this.assetGroups.values()) rows.sort((a, b) => a.path.localeCompare(b.path, 'en', {numeric: true}));
+      this.groupRows = this.rows;
+    }
+    const rows = this.assetGroups.get(group) || [];
+    const start = rows.findIndex(row => row.path === path);
+    // A moving window limits both speculative downloads and storage. A large
+    // costume does not cause the rest of the HD pack to download at once.
+    const selected = [];
+    let bytes = 0;
+    for (let offset = 1; offset < rows.length && selected.length < 48; offset++) {
+      const row = rows[(start + offset) % rows.length];
+      if (bytes + row.size > 8 * 1048576) break;
+      if (this.prefetched.has(row.sha) || this.prefetchFailed.has(row.sha) || this.inflight.has(row.sha)) continue;
+      selected.push(row);
+      bytes += row.size;
+    }
+    this.prefetch(selected);
+  }
+
+  // Explicit startup preparation uses the same four workers as the moving
+  // animation window. Paths outside the supplied listing are never fetched.
+  prefetch(rows) {
+    const fresh = rows.filter(row => this.rows.has(row.path) && !row.parts &&
+      !this.prefetched.has(row.sha) && !this.prefetchFailed.has(row.sha) && !this.inflight.has(row.sha));
+    const merged = new Map([...fresh, ...this.prefetchQueue].map(row => [row.sha, row]));
+    this.prefetchQueue = [...merged.values()].slice(0, 96);
+    this.prefetchQueued = new Set(this.prefetchQueue.map(row => row.sha));
+    this.pumpPrefetch();
+  }
+
+  pumpPrefetch() {
+    while (this.prefetchActive < 4 && this.prefetchQueue.length) {
+      const row = this.prefetchQueue.shift();
+      if (!this.prefetchQueued.delete(row.sha) || this.prefetched.has(row.sha) || this.inflight.has(row.sha)) continue;
+      this.prefetchActive++;
+      this.blob(row, row.path.split('/').at(-1), 0, row.size, true)
+        .catch(() => this.prefetchFailed.add(row.sha)) // A background failure must not stop the game.
+        .finally(() => { this.prefetchActive--; this.pumpPrefetch(); });
+    }
   }
 }
 

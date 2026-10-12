@@ -153,6 +153,7 @@ function sendKey(key, code, keyCode) {
 // Touch on phones and tablets (touch.mjs): tap, drag, hold, two and three fingers
 const keys = {F5: ['F5', 'F5', 116], Escape: ['Escape', 'Escape', 27]};
 attachTouch(canvas, name => sendKey(...keys[name]));
+$('game-menu').addEventListener('click', () => sendKey(...keys.F5));
 
 canvas.addEventListener('contextmenu', event => event.preventDefault());
 canvas.addEventListener('webglcontextlost', event => {
@@ -166,8 +167,19 @@ async function launch(source, rows) {
   showScreen(null);
   status('Laster spillmotoren …');
   try {
-    const response = await networkFetch(new URL('data/index.json', baseURL));
+    const [response, buildResponse] = await Promise.all([
+      networkFetch(new URL('data/index.json', baseURL)),
+      networkFetch(new URL('build.json', baseURL), {cache: 'no-store'})
+    ]);
     if (!response.ok) throw new Error('Fant ikke spillmotorens data. Last siden på nytt.');
+    if (!buildResponse.ok) throw new Error('Fant ikke spillmotorens versjon. Last siden på nytt.');
+    const build = await buildResponse.json();
+    const engineURL = path => {
+      const url = new URL(path, baseURL);
+      const hash = build.sha256?.[path];
+      if (/^[a-f0-9]{64}$/.test(hash)) url.searchParams.set('v', hash);
+      return url.href;
+    };
     const indexes = makeIndexes(rows, await response.json());
     // A file the game could not get is shown, not swallowed
     const reader = {read: path => source.read(path).then(blob => {
@@ -192,6 +204,7 @@ async function launch(source, rows) {
     history.replaceState(null, '', location.pathname + location.search + '#' + args.join(' '));
 
     canvas.focus();
+    $('game-menu').hidden = false;
     // F5 is the game's menu, not reload; Ctrl+H is HD or classic, not history
     window.addEventListener('keydown', event => {
       if (/^F([1-9]|10)$/.test(event.key) || event.key === 'Tab' || event.key === 'Backspace' ||
@@ -201,14 +214,14 @@ async function launch(source, rows) {
     Object.defineProperty(navigator, 'requestMIDIAccess', {configurable: true, value: () => new Promise(() => {})});
     window.Module = {
       canvas,
-      locateFile: path => new URL(path, baseURL).href,
+      locateFile: engineURL,
       preRun: [() => {
         for (const [key, value] of Object.entries(env)) ENV[key] = value;
         FS.mkdirTree(env.HOME);
       }],
       onRuntimeInitialized: () => status('Starter The Dig …'),
       onAbort: text => status('Spillmotoren stoppet: ' + text, true),
-      onExit: () => { status(); showScreen('ended'); },
+      onExit: () => { $('game-menu').hidden = true; status(); showScreen('ended'); },
       print: text => {
         console.log(text);
         if (/Could not load any graphics mode/.test(text)) {
@@ -231,11 +244,12 @@ async function launch(source, rows) {
       if (!statusElement.classList.contains('error')) status('Spillmotoren stoppet: ' + (event.reason?.message || event.reason || 'ukjent feil'), true);
     });
     const script = document.createElement('script');
-    script.src = new URL('scummvm.js', baseURL).href;
+    script.src = engineURL('scummvm.js');
     script.onerror = () => status('Spillmotoren kunne ikke lastes. Last siden på nytt.', true);
     document.body.appendChild(script);
   } catch (error) {
     started = false;
+    $('game-menu').hidden = true;
     window.fetch = networkFetch;
     status(error.message, true);
   }
