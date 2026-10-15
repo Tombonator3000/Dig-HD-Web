@@ -611,10 +611,10 @@ index 21938706..17d0c967 100644
  	width *= 8;
 diff --git a/engines/scumm/dighd.cpp b/engines/scumm/dighd.cpp
 new file mode 100644
-index 00000000..6c3350d3
+index 00000000..fce9ef41
 --- /dev/null
 +++ b/engines/scumm/dighd.cpp
-@@ -0,0 +1,5216 @@
+@@ -0,0 +1,5232 @@
 +/* ScummVM - Graphic Adventure Engine
 + *
 + * ScummVM is the legal property of its developers, whose names
@@ -4244,6 +4244,10 @@ index 00000000..6c3350d3
 +	const byte *roomNear = (anyCycled && _roomImage.valid()) ? nearCycleMask(_roomImage) : nullptr;
 +	const int roomW = _roomImage.idx.w;
 +
++	// For the copy of unchanged HD pixels below (32-bit screen in the HD image's format)
++	const bool sameFormat = bpp == 4 && _fmt == _rgba;
++	const uint32 alphaMask = _rgba.ARGBToColor(255, 0, 0, 0);
++
 +	bool anyText = false, anyShade = false;
 +	for (int r = 0; r < height; r++) {
 +		const int sy = y + r;
@@ -4422,6 +4426,18 @@ index 00000000..6c3350d3
 +						for (int k = 0; k < 3; k++)
 +							cap[k] = MAX(cap[k], (int)q[k]);
 +					}
++			}
++			// The common case: the colour is unchanged and the screen has the HD
++			// image's own format. RGBToColor(colorToARGB()) is then the pixel with
++			// full alpha, so the row is copied (byte for byte the same result).
++			if (!tint && !capped && sameFormat) {
++				for (int dy = 0; dy < n; dy++) {
++					uint32 *o = (uint32 *)(out + dy * outPitch);
++					const uint32 *t = (const uint32 *)hd->getBasePtr(hx, hy + dy);
++					for (int dx = 0; dx < n; dx++)
++						o[dx] = t[dx] | alphaMask;
++				}
++				continue;
 +			}
 +			for (int dy = 0; dy < n; dy++) {
 +				byte *o = out + dy * outPitch;
