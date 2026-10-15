@@ -1,5 +1,5 @@
 diff --git a/backends/fs/emscripten/http-fs.cpp b/backends/fs/emscripten/http-fs.cpp
-index 7eecaf22..7395924a 100644
+index 69f1ac06..7395924a 100644
 --- a/backends/fs/emscripten/http-fs.cpp
 +++ b/backends/fs/emscripten/http-fs.cpp
 @@ -33,17 +33,18 @@
@@ -23,22 +23,25 @@ index 7eecaf22..7395924a 100644
  
  	// Normalize the path (that is, remove unneeded slashes etc.)
  	_path = Common::normalizePath(_path, '/');
-@@ -52,20 +53,24 @@ HTTPFilesystemNode::HTTPFilesystemNode(const Common::String &p) : _path(p), _isV
+@@ -52,24 +53,24 @@ HTTPFilesystemNode::HTTPFilesystemNode(const Common::String &p) : _path(p), _isV
  		_isDirectory = true;
  		_isValid = true;
  		_url = _path;
 -	} else { // we need to peek in the parent folder to see if the node exists and if it's a directory
--		AbstractFSNode *parent = getParent();
--		AbstractFSList tmp = AbstractFSList();
--		parent->getChildren(tmp, Common::FSNode::kListAll, true);
--		for (AbstractFSList::iterator i = tmp.begin(); i != tmp.end(); ++i) {
--			AbstractFSNode *child = *i;
--			if (child->getPath() == _path) {
--				_isDirectory = child->isDirectory();
+-		// Dig HD: the parent's listing is read once per folder and shared (listing()).
+-		// Before, every node fetched and parsed the parent's index.json again and kept
+-		// the text, the parsed JSON and a node per entry: a few MB per file opened
+-		// in a folder with thousands of files, until the browser ran out of memory.
+-		HTTPFilesystemNode *parent = (HTTPFilesystemNode *)getParent();
+-		if (parent && parent->_isValid && parent->_isDirectory) {
+-			const HttpListing *list = listing(parent->_url);
+-			const Common::String name = Common::lastPathComponent(_path, '/');
+-			if (list && list->contains(name)) {
+-				const HttpEntry &e = list->getVal(name);
+-				_isDirectory = e.isDir;
 -				_isValid = true;
--				_url = ((HTTPFilesystemNode *)child)->_url;
--				_size = ((HTTPFilesystemNode *)child)->_size;
--				break;
+-				_url = e.url;
+-				_size = e.size;
 +	} else {
 +		// Once a directory index has been parsed, any child lookup is a hash
 +		// lookup. Do not reconstruct a parent's whole list of siblings here.
@@ -50,6 +53,7 @@ index 7eecaf22..7395924a 100644
 +					cacheDirectory(parent._path, parent._url);
  			}
  		}
+-		delete parent;
 +		Common::HashMap<Common::String, Entry>::const_iterator entry = _httpEntries.find(_path);
 +		if (entry != _httpEntries.end()) {
 +			_isDirectory = entry->_value.isDirectory;
@@ -60,55 +64,54 @@ index 7eecaf22..7395924a 100644
  	}
  	assert(_isDirectory || _size >= 0 || !_isValid);
  	debug(5, "HTTPFilesystemNode::HTTPFilesystemNode(%s) -  %s isValid %s isDirectory %s", p.c_str(), _url.c_str(), _isValid ? "True" : "false", _isDirectory ? "True" : "false");
-@@ -135,53 +140,68 @@ EM_ASYNC_JS(bool, _httpFsFetchFile, (const char *url, byte *dataPtr, int dataSiz
+@@ -139,55 +140,69 @@ EM_ASYNC_JS(bool, _httpFsFetchFile, (const char *url, byte *dataPtr, int dataSiz
  	return false;
  });
  
--bool HTTPFilesystemNode::getChildren(AbstractFSList &myList, ListMode mode, bool hidden) const {
--	if (!_isValid) {
+-// Dig HD: the listing of each folder (index.json), fetched and parsed once
+-const HTTPFilesystemNode::HttpListing *HTTPFilesystemNode::listing(const Common::String &url) {
+-	static Common::HashMap<Common::String, HttpListing *> listings;
+-	if (listings.contains(url))
+-		return listings[url];
 +bool HTTPFilesystemNode::cacheDirectory(const Common::String &path, const Common::String &url) {
 +	if (_httpFolders.contains(path))
 +		return true;
 +
 +	debug(5, "HTTPFilesystemNode::cacheDirectory Fetching Children: %s at %s", path.c_str(), url.c_str());
-+	char *response = _httpFsFetchIndex((url + "/index.json").c_str());
+ 	char *response = _httpFsFetchIndex((url + "/index.json").c_str());
+-	HttpListing *list = nullptr;
+-	if (strcmp(response, "") != 0) {
+-		Common::JSONValue *json = Common::JSON::parse(response);
+-		if (json && json->isObject()) {
+-			list = new HttpListing();
+-			const Common::JSONObject &obj = json->asObject();
+-			for (Common::JSONObject::const_iterator i = obj.begin(); i != obj.end(); ++i) {
+-				HttpEntry e;
+-				e.isDir = false;
+-				e.size = -1;
+-				e.url = url + "/" + i->_key;
+-				if (i->_value->isObject()) {
+-					e.isDir = true;
+-					if (i->_value->asObject().contains("baseUrl"))
+-						e.url = i->_value->asObject()["baseUrl"]->asString();
+-				} else if (i->_value->isIntegerNumber()) {
+-					e.size = i->_value->asIntegerNumber();
+-				}
+-				(*list)[i->_key] = e;
+-			}
+-		}
+-		delete json;
 +	if (!response || !*response) {
 +		free(response);
- 		return false;
++		return false;
  	}
--	assert(_isDirectory);
--	if (_children->size() == 0) {
--		// if we don't have a children list yet, we need to fetch it from the server
--		debug(5, "HTTPFilesystemNode::getChildren Fetching Children: %s at %s", _path.c_str(), _url.c_str());
--		Common::String url = _url + "/index.json";
--		char *response = _httpFsFetchIndex(url.c_str());
--		if (strcmp(response, "") == 0) {
--			return false;
--		}
- 
--		Common::JSONObject jsonObj = Common::JSON::parse(response)->asObject();
--		// add dummy element so we know that we fetched the list
--		_children->push_back(new HTTPFilesystemNode(_path, ".", _url, false, false, 0));
--		for (typename Common::HashMap<Common::String, Common::JSONValue *>::iterator i = jsonObj.begin(); i != jsonObj.end(); ++i) {
--			Common::String name = i->_key;
--			bool isDir = false;
--			int size = -1;
--			Common::String baseUrl = _url + "/" + name;
--
--			if (i->_value->isObject()) {
--				isDir = true;
--				if (i->_value->asObject().contains("baseUrl")) {
--					debug(5, "HTTPFilesystemNode::directoryListedCallback - Directory with baseUrl %s", name.c_str());
--					baseUrl = i->_value->asObject()["baseUrl"]->asString();
--				}
--			} else if (i->_value->isIntegerNumber()) {
--				size = i->_value->asIntegerNumber();
--			}
--			HTTPFilesystemNode *file_node = new HTTPFilesystemNode(_path + "/" + name, name, baseUrl, true, isDir, size);
--			_children->push_back(file_node);
++
 +	// The parser owns the JSON tree; the JS bridge's malloc buffer is separate.
 +	Common::JSONValue *json = Common::JSON::parse(response);
-+	free(response);
+ 	free(response);
+-	if (list)
+-		listings[url] = list;  // a failed fetch is tried again next time
+-	return list;
 +	if (!json || !json->isObject()) {
 +		delete json;
 +		return false;
@@ -128,35 +131,34 @@ index 7eecaf22..7395924a 100644
 +				baseUrl = directory["baseUrl"]->asString();
 +		} else if (i->_value->isIntegerNumber()) {
 +			size = i->_value->asIntegerNumber();
- 		}
++		}
 +
 +		const Common::String childPath = path + "/" + name;
 +		_httpEntries[childPath] = Entry(baseUrl, isDir, size);
 +		children.push_back(childPath);
- 	}
--	for (AbstractFSList::iterator i = (*_children).begin(); i != (*_children).end(); ++i) {
--		HTTPFilesystemNode *node = (HTTPFilesystemNode *)*i;
--
--		if (node->_isValid && (mode == Common::FSNode::kListAll ||
--							   (mode == Common::FSNode::kListFilesOnly && !node->_isDirectory) ||
--							   (mode == Common::FSNode::kListDirectoriesOnly && node->_isDirectory))) {
--			// we need to copy node here as FSNode will take ownership of the pointer and destroy it after use
--			HTTPFilesystemNode *file_node = new HTTPFilesystemNode(*node);
--			myList.push_back(file_node);
--		} else {
--			debug(5, "HTTPFilesystemNode::getChildren - skipping %s", node->_path.c_str());
++	}
 +	delete json;
 +	// Presence, rather than a dummy child, marks even an empty index as loaded.
 +	_httpFolders[path] = children;
 +	return true;
-+}
-+
-+bool HTTPFilesystemNode::getChildren(AbstractFSList &myList, ListMode mode, bool hidden) const {
+ }
+ 
+ bool HTTPFilesystemNode::getChildren(AbstractFSList &myList, ListMode mode, bool hidden) const {
+-	if (!_isValid) {
 +	if (!_isValid)
-+		return false;
-+	assert(_isDirectory);
+ 		return false;
+-	}
+ 	assert(_isDirectory);
+-	debug(5, "HTTPFilesystemNode::getChildren %s at %s", _path.c_str(), _url.c_str());
+-	const HttpListing *list = listing(_url);
+-	if (!list)
 +	if (!cacheDirectory(_path, _url))
-+		return false;
+ 		return false;
+-	for (HttpListing::const_iterator i = list->begin(); i != list->end(); ++i) {
+-		const HttpEntry &e = i->_value;
+-		if (mode == Common::FSNode::kListAll || (mode == Common::FSNode::kListFilesOnly && !e.isDir) ||
+-		    (mode == Common::FSNode::kListDirectoriesOnly && e.isDir))
+-			myList.push_back(new HTTPFilesystemNode(_path + "/" + i->_key, i->_key, e.url, true, e.isDir, e.size));
 +
 +	const Common::Array<Common::String> &children = _httpFolders[_path];
 +	for (uint i = 0; i < children.size(); ++i) {
@@ -168,10 +170,11 @@ index 7eecaf22..7395924a 100644
 +			// FSNode takes ownership. Only explicit listings allocate child nodes.
 +			myList.push_back(new HTTPFilesystemNode(path, Common::lastPathComponent(path, '/'),
 +				entry.url, true, entry.isDirectory, entry.size));
- 		}
++		}
  	}
  	return true;
-@@ -215,36 +235,37 @@ AbstractFSNode *HTTPFilesystemNode::getParent() const {
+ }
+@@ -220,36 +235,37 @@ AbstractFSNode *HTTPFilesystemNode::getParent() const {
  Common::SeekableReadStream *HTTPFilesystemNode::createReadStream() {
  	debug(5, "*HTTPFilesystemNode::createReadStream() %s (size %d) ", _path.c_str(), _size);
  	Common::String fsCachePath = Common::normalizePath("/.cache/" + _path, '/');
@@ -221,7 +224,7 @@ index 7eecaf22..7395924a 100644
  
  	return PosixIoStream::makeFromPath(fsCachePath, StdioStream::WriteMode_Read);
 diff --git a/backends/fs/emscripten/http-fs.h b/backends/fs/emscripten/http-fs.h
-index 75bf8738..34d079dc 100644
+index 3b018481..34d079dc 100644
 --- a/backends/fs/emscripten/http-fs.h
 +++ b/backends/fs/emscripten/http-fs.h
 @@ -24,6 +24,7 @@
@@ -232,19 +235,25 @@ index 75bf8738..34d079dc 100644
  
  /**
   * Implementation of the ScummVM file system API based on POSIX.
-@@ -32,11 +33,23 @@
+@@ -32,19 +33,23 @@
   */
  class HTTPFilesystemNode : public AbstractFSNode {
  protected:
 -	static Common::HashMap<Common::String, AbstractFSList> _httpFolders;
+-	// Dig HD: one shared listing per folder URL (see listing() in http-fs.cpp)
+-	struct HttpEntry {
+-		bool isDir;
+-		int size;
 +	struct Entry {
-+		Common::String url;
+ 		Common::String url;
 +		bool isDirectory;
 +		int size;
 +
 +		Entry() : isDirectory(false), size(-1) {}
 +		Entry(const Common::String &u, bool directory, int s) : url(u), isDirectory(directory), size(s) {}
-+	};
+ 	};
+-	typedef Common::HashMap<Common::String, HttpEntry> HttpListing;
+-	static const HttpListing *listing(const Common::String &url);
 +
 +	// Immutable metadata for this game session. Nodes own only their own fields;
 +	// listing a directory must not allocate and leak every sibling on each lookup.
