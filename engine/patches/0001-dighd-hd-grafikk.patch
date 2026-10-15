@@ -611,10 +611,10 @@ index 21938706..17d0c967 100644
  	width *= 8;
 diff --git a/engines/scumm/dighd.cpp b/engines/scumm/dighd.cpp
 new file mode 100644
-index 00000000..ecaeeb33
+index 00000000..6c3350d3
 --- /dev/null
 +++ b/engines/scumm/dighd.cpp
-@@ -0,0 +1,5203 @@
+@@ -0,0 +1,5216 @@
 +/* ScummVM - Graphic Adventure Engine
 + *
 + * ScummVM is the legal property of its developers, whose names
@@ -796,11 +796,19 @@ index 00000000..ecaeeb33
 +}
 +
 +DigHD *DigHD::create(ScummEngine *vm) {
-+	// The Dig (SCUMM v7) and Sam & Max Hit the Road (SCUMM v6). In Sam & Max the
-+	// rooms, objects and blast objects get HD; costumes (ClassicCostumeRenderer)
-+	// and text (CharsetRendererClassic) have no hooks yet and show original pixels.
-+	if (vm->_game.id != GID_DIG && vm->_game.id != GID_SAMNMAX)
++	// The Dig (SCUMM v7), Sam & Max Hit the Road (SCUMM v6) and Zak McKracken
++	// (SCUMM v3, FM-Towns).
++	if (vm->_game.id != GID_DIG && vm->_game.id != GID_SAMNMAX && vm->_game.id != GID_ZAK)
 +		return nullptr;
++#ifndef DISABLE_TOWNS_DUAL_LAYER_MODE
++	// FM-Towns draws through its own screen layers (towns_drawStripToScreen),
++	// past the hooks. Zak HD is built with the layers turned off, so the game
++	// goes through the plain 8-bit drawing like the DOS versions.
++	if (vm->_game.platform == Common::kPlatformFMTowns) {
++		warning("DigHD: FM-Towns needs a build with DISABLE_TOWNS_DUAL_LAYER_MODE; HD is off");
++		return nullptr;
++	}
++#endif
 +	Common::String mod = ConfMan.get("dighd_mod");
 +	if (const char *env = getenv("DIGHD_MOD"))
 +		mod = env;
@@ -1265,12 +1273,15 @@ index 00000000..ecaeeb33
 +	if (state <= 0)
 +		return;
 +
-+	uint32 key = ((uint32)obj << 8) | (uint32)state;
++	// SCUMM v3 has one image per object, shown in every state but 0
++	// (getObjectImage() leaves the state out); the mod calls it objNNN_01
++	const int image = _vm->_game.version <= 3 ? 1 : state;
++	uint32 key = ((uint32)obj << 8) | (uint32)image;
 +	Image *img = nullptr;
 +	if (!_objectImages.tryGetVal(key, img)) {
 +		img = new Image();
-+		Common::Path hd(Common::String::format("objects/obj%03d_%02X.png", obj, state));
-+		Common::Path idx(Common::String::format("objects/obj%03d_%02X_idx.png", obj, state));
++		Common::Path hd(Common::String::format("objects/obj%03d_%02X.png", obj, image));
++		Common::Path idx(Common::String::format("objects/obj%03d_%02X_idx.png", obj, image));
 +		if (!loadImage(hd, idx, width, height, *img)) {
 +			delete img;
 +			img = nullptr;
@@ -4801,7 +4812,9 @@ index 00000000..ecaeeb33
 +		const bool v7 = _vm->_game.version >= 7;
 +		const int rw = rmhd ? READ_LE_UINT16(v7 ? &rmhd->v7.width : &rmhd->old.width) : 0;
 +		const int rh = rmhd ? READ_LE_UINT16(v7 ? &rmhd->v7.height : &rmhd->old.height) : 0;
-+		if (rw < _vm->_screenWidth || rh < _vm->_screenHeight) {
++		// The room is shown in the main virtual screen, which in SCUMM v3 is lower than
++		// the screen (Zak: 128 of 240 lines, the rest is text, verbs and inventory)
++		if (rw < _vm->_screenWidth || rh < _vm->_virtscr[kMainVirtScreen].h) {
 +			_testDone = true;
 +			debug("DigHD: test, room %d is %dx%d, smaller than the screen: no jump", _testRoom, rw, rh);
 +		}
