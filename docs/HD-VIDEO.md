@@ -13,8 +13,9 @@ gjelder også filmer spillet avbryter eller starter fra et senere rammenummer.
 - Én synlig videoramme per SAN-ramme, uten interpolering eller skjult alt-ref.
   Første IVF-tidsstempel er 0, så 1, 2 osv. PNG `00000.png` og IVF-ramme 0
   erstatter begge SmushPlayer-ramme 1. SAN er klokken; IVF-fps endrer ikke spillet.
-- Original pikselgeometri beholdes. ScummVM sin sideforholdskorreksjon gir 4:3.
-  Ikke strekk bildefilen til 1440 x 1080 før innlegging i modden.
+- Original pikselgeometri beholdes. IVF lagrer ikke piksel-sideforhold (SAR);
+  visningen følger motorens eksisterende HD-flate. Ikke strekk bildefilen til
+  1440 x 1080 før innlegging i modden. Egen 4:3-korreksjon er ikke lagt til her.
 - Video velges først. Manglende, ugyldig eller avkortet video gir PNG-tilbakefall
   (`san/SQ1/00000.png` osv.), ellers originalgrafikk. Feil logges én gang per film.
   En motor uten libvpx støtter fortsatt PNG og originalgrafikk.
