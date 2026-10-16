@@ -1,0 +1,528 @@
+diff --git a/engines/scumm/akos.cpp b/engines/scumm/akos.cpp
+--- a/engines/scumm/akos.cpp
++++ b/engines/scumm/akos.cpp
+@@ -742,12 +742,12 @@
+ 
+ 	bdd.mirror = !_drawActorToRight;
+ 
+-	drawBomp(bdd);
+-
+ 	// Without the actor palette (setPalette()), the codes are drawn as palette indices
+ 	if (_vm->_digHD)
+ 		_vm->_digHD->noteCel(_digCel, bdd.x, bdd.y, _width, _height, bdd.mirror, _vm->_virtscr[kMainVirtScreen].xstart,
+-		                     !_useBompPalette, false, _shadowMode);
++		                     !_useBompPalette, true, _shadowMode);
++	bdd.digHD = _vm->_digHD;
++	drawBomp(bdd);
+ 
+ 	_useBompPalette = false;
+ 
+diff --git a/engines/scumm/bomp.cpp b/engines/scumm/bomp.cpp
+--- a/engines/scumm/bomp.cpp
++++ b/engines/scumm/bomp.cpp
+@@ -23,6 +23,7 @@
+ #include "scumm/scumm.h"
+ #include "scumm/akos.h"
+ #include "scumm/bomp.h"
++#include "scumm/dighd.h"
+ #include "scumm/util.h"
+ 
+ 
+@@ -332,7 +333,31 @@
+ 
+ 			// Finally, draw the decoded, scaled, masked and recolored line onto
+ 			// the target surface, using the specified shadow mode
++			byte before[1024];
++			if (bd.digHD)
++				memcpy(before, dst, width);
+ 			bompApplyShadow(bd.shadowMode, bd.shadowPalette, line_ptr, dst, width, 255);
++			if (bd.digHDBlast) {
++				for (int xx = 0; xx < width; xx++) {
++					const byte code = line_ptr[xx];
++					if (code != 255) {
++						const int table = bd.shadowMode == 1 && code == 13 ? 0 :
++						                  bd.shadowMode == 3 && code < 8 ? code : -1;
++						bd.digHDBlast->recordBlastPixel(dst + xx, table);
++					}
++				}
++			}
++			if (bd.digHD) {
++				for (int xx = 0; xx < width; xx++) {
++					const byte code = line_ptr[xx];
++					if (code == 255)
++						continue;
++					const bool paletteMask = (bd.shadowMode == 1 && code == 13) ||
++					                         (bd.shadowMode == 3 && code < 8);
++					const int sourceX = bd.mirror ? bd.srcwidth - 1 - clip.left - xx : clip.left + xx;
++					bd.digHD->recordCelPixel(dst + xx, sourceX, pos_y, paletteMask, before[xx]);
++				}
++			}
+ 		}
+ 
+ 		// Advance to the next line
+diff --git a/engines/scumm/bomp.h b/engines/scumm/bomp.h
+--- a/engines/scumm/bomp.h
++++ b/engines/scumm/bomp.h
+@@ -27,6 +27,8 @@
+ 
+ namespace Scumm {
+ 
++class DigHD;
++
+ void bompApplyMask(byte *line_buffer, byte *mask, byte maskbit, int32 size, byte transparency);
+ void bompApplyShadow(int shadowMode, const byte *shadowPalette, const byte *line_buffer, byte *dst, int32 size, byte transparency, bool HE7Check = false);
+ 
+@@ -54,6 +56,9 @@
+ 	uint16 *actorPalette;
+ 
+ 	bool mirror;
++	// Costume rendering only. Blast objects retain their separate provenance.
++	DigHD *digHD = nullptr;
++	DigHD *digHDBlast = nullptr;
+ };
+ 
+ void drawBomp(const BompDrawData &bd);
+diff --git a/engines/scumm/dighd.cpp b/engines/scumm/dighd.cpp
+--- a/engines/scumm/dighd.cpp
++++ b/engines/scumm/dighd.cpp
+@@ -420,6 +420,7 @@
+ 	_coverSlot.resize(_w * _h);
+ 	_softBase.resize(_w * _h);
+ 	_shade.resize(_w * _h);
++	_shadeTable.resize(_w * _h);
+ 	_missOwner.resize(_w * _h);
+ 	_softBlastRef.resize(_w * _h);
+ 	for (uint i = 0; i < _coverSeq.size(); i++)
+@@ -427,6 +428,7 @@
+ 	memset(_coverSlot.data(), 0, _coverSlot.size() * sizeof(uint16));
+ 	memset(_softBase.data(), 0, _softBase.size());
+ 	memset(_shade.data(), 0, _shade.size() * sizeof(uint16));
++	memset(_shadeTable.data(), 0, _shadeTable.size());
+ 	memset(_softBlastRef.data(), 0, _softBlastRef.size() * sizeof(uint16));
+ 	memset(_shadow.data(), 0, _shadow.size());
+ 	memset(_source.data(), 0, _source.size() * sizeof(uint32));
+@@ -591,6 +593,21 @@
+ 	out.hd.copyFrom(*conv);
+ 	conv->free();
+ 	delete conv;
++	out.exactNearest = !pad;
++	for (int yy = 0; yy < out.hd.h && out.exactNearest; yy++) {
++		for (int xx = 0; xx < out.hd.w; xx++) {
++			const byte code = *(const byte *)out.idx.getBasePtr(xx / _scale, yy / _scale);
++			if (!out.visibleAt(xx / _scale, yy / _scale))
++				continue;
++			byte a, r, g, b;
++			_rgba.colorToARGB(READ_UINT32(out.hd.getBasePtr(xx, yy)), a, r, g, b);
++			const byte *p = out.basePal + code * 3;
++			if (a != 255 || r != p[0] || g != p[1] || b != p[2]) {
++				out.exactNearest = false;
++				break;
++			}
++		}
++	}
+ 	if (!pad) {
+ 		// Soft alpha values (not only 0 and 255): the edge is drawn soft over the HD room
+ 		for (int yy = 0; yy < out.hd.h && !out.softEdge; yy++) {
+@@ -838,6 +855,8 @@
+ 	_blastW = x1 - x0;
+ 	_blastH = y1 - y0;
+ 	_blastPre.resize(_blastW * _blastH);
++	_blastWriteKind.resize(_blastW * _blastH);
++	memset(_blastWriteKind.data(), -2, _blastWriteKind.size());
+ 	for (int r = 0; r < _blastH; r++)
+ 		memcpy(&_blastPre[r * _blastW], vs->getBasePtr(x0, y0 + r), _blastW);
+ 	// The rectangle the engine gave, for the object image's coordinates
+@@ -847,6 +866,18 @@
+ 	_blastScaleY = CLIP(scaleY, 1, 255);
+ 	_blastObjW = width;
+ 	_blastObjH = height;
++}
++
++void DigHD::recordBlastPixel(const byte *dest, int table) {
++	if (!_blastVs)
++		return;
++	const byte *start = (const byte *)_blastVs->getBasePtr(_blastX, _blastY);
++	if (dest < start)
++		return;
++	const size_t off = dest - start;
++	const int row = off / _blastVs->pitch, col = off % _blastVs->pitch;
++	if (row < _blastH && col < _blastW)
++		_blastWriteKind[row * _blastW + col] = table;
+ }
+ 
+ void DigHD::endBlast(int obj, int state, int shadowMode, const byte *shadowPalette) {
+@@ -877,13 +908,15 @@
+ 		const byte *row = (const byte *)vs->getBasePtr(_blastX, _blastY + r);
+ 		for (int c = 0; c < _blastW; c++) {
+ 			const byte pre = _blastPre[r * _blastW + c], post = row[c];
+-			if (pre == post && !softRef)
++			const int writeKind = _blastWriteKind[r * _blastW + c];
++			if (writeKind == -2 && pre == post && !softRef)
+ 				continue;
+ 			BlastMark &m = _blastMarks[(size_t)(_blastY + r) * vs->pitch + _blastX + c];
+ 			const BlastMark previous = m;
+ 			m.gen = _blastGen;
+ 			m.pre = pre;
+ 			m.post = post;
++			m.table = writeKind >= 0 ? writeKind + 1 : 0;
+ 			m.slot = 0;
+ 			m.ox = m.oy = 0;
+ 			m.shade = m.soft = 0;
+@@ -892,6 +925,7 @@
+ 				m.kind = kBlastSoft;
+ 				m.soft = softRef;
+ 				if (previous.gen == _blastGen && previous.post == pre) {
++					m.table = previous.table;
+ 					if (previous.kind == kBlastShade) {
+ 						m.pre = previous.pre;
+ 						m.shade = (uint16)((previous.pre << 8) | pre);
+@@ -908,10 +942,10 @@
+ 			}
+ 			// Shadow mode 1 darkens through table 0, mode 3 through one of tables 0 to 7
+ 			// (bompApplyShadow1/3 in bomp.cpp)
+-			bool shade = false;
+-			if (shadowPalette && shadowMode == 1)
++			bool shade = writeKind >= 0;
++			if (writeKind == -2 && shadowPalette && shadowMode == 1)
+ 				shade = shadowPalette[pre] == post;
+-			else if (shadowPalette && shadowMode == 3)
++			else if (writeKind == -2 && shadowPalette && shadowMode == 3)
+ 				for (int k = 0; k < 8 && !shade; k++)
+ 					shade = shadowPalette[pre + (k << 8)] == post;
+ 			if (shade) {
+@@ -1273,7 +1307,7 @@
+ 	const VirtScreen &vs = _vm->_virtscr[kMainVirtScreen];
+ 	// Downscaling can overwrite one destination pixel with several original
+ 	// columns. The tint histogram must describe the final writes too.
+-	if (c.soft && m.seq == c.seq && vs.backBuf && m.val != vs.backBuf[off] &&
++	if (c.soft && !m.paletteMask && m.seq == c.seq && vs.backBuf && m.val != vs.backBuf[off] &&
+ 	    !wildColour(c.image->basePal + m.code * 3, _pal + m.val * 3) && c.hist[m.val]) {
+ 		c.hist[m.val]--;
+ 		for (int k = 0; k < 3; k++)
+@@ -1301,7 +1335,7 @@
+ 	m.paletteMask = paletteMask;
+ 	if (c.image && sourceX >= 0 && sourceY >= 0 && sourceX < c.image->idx.w && sourceY < c.image->idx.h) {
+ 		m.code = *((const byte *)c.image->idx.getBasePtr(sourceX, sourceY));
+-		if (c.soft && vs.backBuf && *dest != vs.backBuf[off] &&
++		if (c.soft && !paletteMask && vs.backBuf && *dest != vs.backBuf[off] &&
+ 		    !wildColour(c.image->basePal + m.code * 3, _pal + *dest * 3)) {
+ 			c.hist[*dest]++;
+ 			for (int k = 0; k < 3; k++)
+@@ -1644,9 +1678,9 @@
+ 				xbr4(m, zw, zh, zvis);
+ 		}
+ 		const bool zsmooth = !zvis.empty();
+-		// The Dig: rods entering the floor and the museum's distant panorama keep a
+-		// hard z-plane on the hidden side (see below)
+-		const bool hardZ = zbuf && _vm->_game.id == GID_DIG && (c.costume == 119 || (c.costume >= 298 && c.costume <= 300));
++		// The Dig: rods entering the floor keep a hard hidden side. The museum
++		// uses the smooth contour, including antialias coverage across its boundary.
++		const bool hardZ = zbuf && _vm->_game.id == GID_DIG && (c.costume >= 298 && c.costume <= 300);
+ 
+ 		for (int sy = r.top; sy < r.bottom; sy++) {
+ 			const int vy = sy + vyOff;
+@@ -1725,8 +1759,8 @@
+ 							pa = (uint32)(acc[3] * 255);
+ 						}
+ 						if (hardZ) {
+-							// Rods entering the floor and the museum's distant panorama
+-							// (The Dig) meet a hard original foreground z-mask. Feather
++							// Rods entering the floor (The Dig) meet a hard original
++							// foreground z-mask. Feather
+ 							// only its visible side at HD resolution: hidden source pixels
+ 							// remain fully hidden, so the panorama cannot cover the floor.
+ 							const float zx = rx + (dx + .5f) / n - .5f;
+@@ -1912,6 +1946,7 @@
+ 			uint16 coverSlot = 0;
+ 			bool softBase = false;
+ 			uint16 shade = 0, softBlast = 0;
++			byte shadeTable = 0;
+ 			int blastKind = kBlastNone;
+ 
+ 			// A blast object over this pixel (the inventory): a darkened pixel is
+@@ -1924,6 +1959,7 @@
+ 					if (bm.gen == _blastGen && bm.post == idx) {
+ 						blastKind = bm.kind;
+ 						if (bm.kind == kBlastSoft) {
++							shadeTable = bm.table;
+ 							softBlast = bm.soft;
+ 							idx = bm.pre;
+ 							shade = bm.shade;
+@@ -1932,6 +1968,7 @@
+ 								blastKind = kBlastImage;
+ 							}
+ 						} else if (bm.kind == kBlastShade) {
++							shadeTable = bm.table;
+ 							shade = (uint16)((bm.pre << 8) | idx);  // never 0: pre != post
+ 							idx = bm.pre;
+ 						} else if (bm.kind == kBlastImage) {
+@@ -2007,7 +2044,15 @@
+ 							}
+ 						}
+ 						if (shade) {
+-							// built from the background below
++							// The shade's pre-colour belongs to the original actor, not
++							// to the room. Erase that actor before compositing its soft
++							// HD replacement, just as on an unshaded pixel. Otherwise
++							// its old silhouette leaks around the HD drawing under both
++							// palette-mask costumes and the inventory shade.
++							if (cs.used && cs.soft) {
++								softBase = true;
++								baseIdx = b[c];
++							}
+ 						} else if (cs.used && cs.soft) {
+ 							// A soft cel is laid over the HD picture of the background
+ 							// under it (drawSoftCels()). Its shadows and effects stay
+@@ -2020,10 +2065,11 @@
+ 							                  (cs.costume == 301 || cs.costume == 35 || cs.costume == 61 ||
+ 							                   (cs.costume >= 78 && cs.costume <= 91));
+ 							if (cs.precise) {
+-								// The exact code the decoder drew here (recordCelPixel())
+-								const byte code = m.code;
+-								kept = (int)code != cs.image->transparent &&
+-								       ((cs.raw && code != idx) || wildColour(cs.image->basePal + code * 3, _pal + idx * 3));
++								// The decoder already distinguishes art from palette masks.
++								// Palette changes do not turn a recorded art pixel into an
++								// effect. Keeping it here leaves the original silhouette
++								// behind the soft image (notably the crystal's old matte).
++								kept = false;
+ 							} else if (lx >= -1 && ly >= -1 && lx <= cs.rw && ly <= cs.rh) {
+ 								kept = !softCelColour(cs, lx, ly, idx);
+ 							}
+@@ -2090,14 +2136,15 @@
+ 			    _frameNo >= (uint32)_debugPixelFrom) {
+ 				const size_t off = textOff + (size_t)r * pitch + c;
+ 				const CelMark *m = (celMarks && off < _celMain.size) ? &celMarks[off] : nullptr;
+-				debug("DigHD: pixel %d,%d: idx %d back %d source %08x soft %d cover %u, celOn %d mapping %d, mark seq %u val %d slot %d (slot seq %u, soft %d used %d)",
++				debug("DigHD: pixel %d,%d: idx %d back %d source %08x soft %d cover %u, celOn %d mapping %d, mark seq %u val %d slot %d (slot seq %u, soft %d used %d), shade %04x table %d",
+ 				      sx, sy, idx, b ? b[c] : -1, source, softBase, coverSeq, (int)celOn, (int)mapping, m ? m->seq : 0, m ? m->val : -1, m ? m->slot : -1,
+-				      m ? _cels[m->slot].seq : 0, m ? _cels[m->slot].soft : 0, m ? _cels[m->slot].used : 0);
++				      m ? _cels[m->slot].seq : 0, m ? _cels[m->slot].soft : 0, m ? _cels[m->slot].used : 0, shade, shadeTable);
+ 			}
+ 			_shadow[sy * _w + sx] = f[c];
+ 			_base[sy * _w + sx] = baseIdx;
+ 			_softBase[sy * _w + sx] = softBase;
+ 			_shade[sy * _w + sx] = shade;
++			_shadeTable[sy * _w + sx] = shadeTable;
+ 			_softBlastRef[sy * _w + sx] = softBlast;
+ 			_text[sy * _w + sx] = text;
+ 			_source[sy * _w + sx] = source;
+@@ -2124,6 +2171,7 @@
+ 			_text[sy * _w + sx] = 0;
+ 			_softBase[sy * _w + sx] = 0;
+ 			_shade[sy * _w + sx] = 0;
++			_shadeTable[sy * _w + sx] = 0;
+ 			_softBlastRef[sy * _w + sx] = 0;
+ 			setCover(sy * _w + sx, kCoverAll, 0);
+ 		}
+@@ -2282,6 +2330,7 @@
+ 			_missOwner[r * _w + c] = _source[r * _w + c] == kSrcFlatMissing ? filmOwner : 0;
+ 			_softBase[r * _w + c] = 0;
+ 			_shade[r * _w + c] = 0;
++			_shadeTable[r * _w + c] = 0;
+ 			_softBlastRef[r * _w + c] = 0;
+ 			setCover(r * _w + c, kCoverAll, 0);
+ 		}
+@@ -3814,8 +3863,8 @@
+ 			anyText |= glyph;
+ 			// Under a soft cel the picture is built for the background under it
+ 			// Under a blast object's shade the picture is built for what is under it (tinted below)
+-			const byte idx = (glyph || (!flatOnly && (_softBase[sy * _w + sx] || _shade[sy * _w + sx] || _softBlastRef[sy * _w + sx]))) ? _base[sy * _w + sx] : _shadow[sy * _w + sx];
+-			anyShade |= !flatOnly && _shade[sy * _w + sx];
++			const byte idx = (glyph || (!flatOnly && (_softBase[sy * _w + sx] || _shade[sy * _w + sx] || _shadeTable[sy * _w + sx] || _softBlastRef[sy * _w + sx]))) ? _base[sy * _w + sx] : _shadow[sy * _w + sx];
++			anyShade |= !flatOnly && (_shade[sy * _w + sx] || _shadeTable[sy * _w + sx]);
+ 			const uint32 src = _source[sy * _w + sx];
+ 			const uint32 kind = src & kSrcMask;
+ 			byte *out = _outBuf.data() + (r * n) * outPitch + (c * n) * bpp;
+@@ -3972,15 +4021,25 @@
+ 			// the outlines stayed lit on the black screen.
+ 			int cap[3] = { 255, 255, 255 };
+ 			const byte *bp = img->basePal + code * 3;
+-			const bool capped = !tint && !(bp[0] | bp[1] | bp[2]);
+-			if (capped) {
++			bool capped = false;
++			if (!tint && !(bp[0] | bp[1] | bp[2])) {
+ 				cap[0] = cap[1] = cap[2] = 0;
+-				for (int ny = MAX(sy - 1, 0); ny <= MIN(sy + 1, _h - 1); ny++)
+-					for (int nx = MAX(sx - 1, 0); nx <= MIN(sx + 1, _w - 1); nx++) {
+-						const byte *q = _pal + _shadow[ny * _w + nx] * 3;
+-						for (int k = 0; k < 3; k++)
++				int originalCap[3] = { 0, 0, 0 };
++				// Use the image's palette neighbours, before overlays. A cap
++				// based on the darkened screen stamps the old picture into HD
++				// and darkens black source pixels twice under the inventory.
++				for (int ny = MAX(iy - 1, 0); ny <= MIN(iy + 1, img->idx.h - 1); ny++)
++					for (int nx = MAX(ix - 1, 0); nx <= MIN(ix + 1, img->idx.w - 1); nx++) {
++						const byte neighbour = *(const byte *)img->idx.getBasePtr(nx, ny);
++						const byte *q = _pal + neighbour * 3;
++						const byte *original = img->basePal + neighbour * 3;
++						for (int k = 0; k < 3; k++) {
+ 							cap[k] = MAX(cap[k], (int)q[k]);
++							originalCap[k] = MAX(originalCap[k], (int)original[k]);
++						}
+ 					}
++				for (int k = 0; k < 3; k++)
++					capped |= cap[k] < originalCap[k];
+ 			}
+ 			// The common case: the colour is unchanged and the screen has the HD
+ 			// image's own format. RGBToColor(colorToARGB()) is then the pixel with
+@@ -4026,18 +4085,60 @@
+ 	// A blast object's shade (the see-through inventory box): the HD picture
+ 	// under it, figures included, darkened like the original colour was
+ 	if (anyShade) {
++		// Fit each original shadow table as a colour transform. Applying a
++		// different ratio per original pixel imprints the old low-resolution
++		// hand/face texture onto an otherwise HD image. The transform depends
++		// on the table and palette, not the old picture under the overlay.
++		int shadeGain[8][3], shadeBias[8][3];
++		const int shadowTables = _vm->_shadowPalette ? MIN(8, _vm->_shadowPaletteSize / 256) : 0;
++		for (int table = 0; table < shadowTables; table++) {
++			for (int k = 0; k < 3; k++) {
++				double sx = 0, sy = 0, sxx = 0, sxy = 0;
++				for (int p = 0; p < 256; p++) {
++					const double a = _pal[p * 3 + k];
++					const double b = _pal[_vm->_shadowPalette[(table << 8) + p] * 3 + k];
++					sx += a; sy += b; sxx += a * a; sxy += a * b;
++				}
++				const double den = 256 * sxx - sx * sx;
++				const double gain = den > 1 ? CLIP((256 * sxy - sx * sy) / den, 0.0, 2.0) : 1;
++				shadeGain[table][k] = (int)(gain * 256 + .5);
++				shadeBias[table][k] = (int)CLIP((sy - gain * sx), -32768.0, 32768.0);
++			}
++		}
+ 		for (int r = 0; r < height; r++) {
+ 			const int sy = y + r;
+ 			for (int c = 0; c < width; c++) {
+ 				const int sx = x + c;
+ 				const uint16 sh = _shade[sy * _w + sx];
+-				if (!sh)
++				if (!sh && !_shadeTable[sy * _w + sx])
+ 					continue;
+ 				const byte *cur = _pal + (sh & 0xFF) * 3;  // the darkened colour shown
+ 				const byte *was = _pal + (sh >> 8) * 3;    // the colour it darkened
++				int table = (int)_shadeTable[sy * _w + sx] - 1;
++				if (table >= shadowTables) table = -1;
++				for (int t = 0; t < shadowTables && table < 0; t++)
++					if (_vm->_shadowPalette[(t << 8) + (sh >> 8)] == (sh & 0xFF))
++						table = t;
+ 				int f[3];
+ 				for (int k = 0; k < 3; k++)
+ 					f[k] = was[k] ? cur[k] * 256 / was[k] : -1;
++				const uint32 origin = _source[sy * _w + sx];
++				const uint32 originKind = origin & kSrcMask;
++				bool exactOriginal = originKind == kSrcFlat;
++				if (originKind == kSrcRoom)
++					exactOriginal = _roomImage.exactNearest;
++				else if (originKind == kSrcObject) {
++					const uint slot = (origin >> 22) & 0xFF;
++					exactOriginal = slot < _drawn.size() && _drawn[slot].image && _drawn[slot].image->exactNearest;
++				} else if (originKind == kSrcCel) {
++					const Image *im = _cels[(origin >> 20) & 0x3FF].image;
++					exactOriginal = im && im->exactNearest;
++				}
++				const uint32 owner = _coverSeq[sy * _w + sx];
++				const uint16 ownerSlot = _coverSlot[sy * _w + sx];
++				const bool softActor = owner != kCoverNone && owner != kCoverAll && ownerSlot < kMaxCelSlots &&
++				    _cels[ownerSlot].used && _cels[ownerSlot].soft && _cels[ownerSlot].seq == owner;
++				exactOriginal &= !softActor;
+ 				byte *out = _outBuf.data() + (r * n) * outPitch + (c * n) * bpp;
+ 				for (int dy = 0; dy < n; dy++) {
+ 					byte *o = out + dy * outPitch;
+@@ -4047,8 +4148,15 @@
+ 						_fmt.colorToRGB(v, cr, cg, cb);
+ 						const int ch[3] = { cr, cg, cb };
+ 						int t[3];
+-						for (int k = 0; k < 3; k++)
+-							t[k] = f[k] < 0 ? cur[k] : MIN(255, ch[k] * f[k] >> 8);
++						const bool originalColour = exactOriginal && v == _fmt.RGBToColor(was[0], was[1], was[2]);
++						for (int k = 0; k < 3; k++) {
++							if (originalColour)
++								t[k] = cur[k];
++							else if (table >= 0 && !exactOriginal)
++								t[k] = CLIP((ch[k] * shadeGain[table][k] + shadeBias[table][k] + 128) >> 8, 0, 255);
++							else
++								t[k] = f[k] < 0 ? cur[k] : MIN(255, ch[k] * f[k] >> 8);
++						}
+ 						const uint32 col = _fmt.RGBToColor(t[0], t[1], t[2]);
+ 						if (bpp == 4) WRITE_UINT32(o, col); else WRITE_UINT16(o, col);
+ 					}
+@@ -4226,6 +4334,7 @@
+ 				_text[y * _w + x] = 0;
+ 				_softBase[y * _w + x] = 0;
+ 				_shade[y * _w + x] = 0;
++				_shadeTable[y * _w + x] = 0;
+ 				_softBlastRef[y * _w + x] = 0;
+ 				setCover(y * _w + x, kCoverAll, 0);
+ 			}
+@@ -4456,6 +4565,8 @@
+ 					_vm->setCurrentPalette(_testPalette);
+ 					debug("DigHD: test, room palette %d", _testPalette);
+ 				}
++				if (envInt("DIGHD_TEST_REMAP_PALETTE", 0))
++					a->remapActorPalette(256, 256, 256, -1);
+ 				// The animations the costume has: frame * directions + direction
+ 				_testAnims.clear();
+ 				_vm->ensureResourceLoaded(rtCostume, _testCostume);
+@@ -4487,7 +4598,8 @@
+ 				const int selected = envInt("DIGHD_TEST_ANIMATION", -1);
+ 				if (selected >= 0 && _testDirs > 0) {
+ 					_testAnims.clear();
+-					_testAnims.push_back(selected * _testDirs + 2);
++					const int direction = CLIP(envInt("DIGHD_TEST_DIRECTION", 2), 0, _testDirs - 1);
++					_testAnims.push_back(selected * _testDirs + direction);
+ 				}
+ 			}
+ 			if (!_testAnims.empty() && _testWalkX < 0) {
+diff --git a/engines/scumm/dighd.h b/engines/scumm/dighd.h
+--- a/engines/scumm/dighd.h
++++ b/engines/scumm/dighd.h
+@@ -183,6 +183,7 @@
+ 	 */
+ 	void beginBlast(VirtScreen *vs, int x, int y, int width, int height, int obj, int state, int scaleX, int scaleY);
+ 	void endBlast(int obj, int state, int shadowMode, const byte *shadowPalette);
++	void recordBlastPixel(const byte *dest, int table);
+ 	void blastsRemoved();
+ 
+ 	/**
+@@ -250,6 +251,7 @@
+ 		// A soft cel (costumeCCC_NNN_hd.png): the HD image has a margin of padX and
+ 		// padY original pixels on each side, and its own alpha (see drawSoftCels())
+ 		bool soft = false;
++		bool exactNearest = false;
+ 		int padX = 0, padY = 0;
+ 		// A room object image (objNNN_SS.png, no margin) whose alpha has soft
+ 		// values: its edge is blended over the HD room (drawSoftObjectEdges())
+@@ -319,6 +321,7 @@
+ 	struct BlastMark {
+ 		uint32 gen;   // _blastGen when drawn; older marks are gone
+ 		byte pre, post;
++		byte table;   // actual shadow-table selector + 1, zero when unknown
+ 		uint16 shade;  // shadow under a soft icon
+ 		uint16 soft;   // 1-based _softBlasts instance
+ 		uint32 underSource;  // an earlier hard object under the icon
+@@ -363,12 +366,14 @@
+ 	Common::Array<byte> _softBase;
+ 	// Shaded by a blast object: 0, or (colour before << 8) | darkened colour shown
+ 	Common::Array<uint16> _shade;
++	Common::Array<byte> _shadeTable;
+ 	Common::Array<BlastMark> _blastMarks;  // per byte of the main virtual screen
+ 	const byte *_blastBase = nullptr;
+ 	size_t _blastSize = 0;
+ 	int _blastPitch = 0;
+ 	uint32 _blastGen = 1;
+ 	Common::Array<byte> _blastPre;
++	Common::Array<int8> _blastWriteKind;
+ 	VirtScreen *_blastVs = nullptr;
+ 	int _blastSlot = -1;
+ 	bool _blastUnscaled = true;
+diff --git a/engines/scumm/object.cpp b/engines/scumm/object.cpp
+--- a/engines/scumm/object.cpp
++++ b/engines/scumm/object.cpp
+@@ -1873,6 +1873,7 @@
+ 	// Dig HD: what the object covers and what it drew (shade or HD image)
+ 	if (_digHD)
+ 		_digHD->beginBlast(vs, bdd.x, bdd.y, bdd.srcwidth, bdd.srcheight, eo->number, eo->image, bdd.scale_x, bdd.scale_y);
++	bdd.digHDBlast = _digHD;
+ 	drawBomp(bdd);
+ 	if (_digHD)
+ 		_digHD->endBlast(eo->number, digImage, bdd.shadowMode, bdd.shadowPalette);
