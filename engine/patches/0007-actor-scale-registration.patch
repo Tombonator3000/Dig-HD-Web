@@ -1,0 +1,170 @@
+--- a/engines/scumm/dighd.cpp
++++ b/engines/scumm/dighd.cpp
+@@ -1208,7 +1208,8 @@
+ 	return img;
+ }
+ 
+-void DigHD::beginActor(int actor, int costume, bool front, int zbuf) {
++void DigHD::beginActor(int actor, int costume, bool front, int zbuf, int scaleX, int scaleY) {
++	_curScaleX = scaleX; _curScaleY = scaleY;
+ 	_curActor = actor;
+ 	_curCostume = costume;
+ 	_curFront = front;
+@@ -1277,6 +1278,7 @@
+ 	c.zbuf = _curZbuf;
+ 	c.live = 0;
+ 	c.gainPal = 0;
++	c.actorScale = false;
+ 	// A cel drawn into the back buffer becomes part of the background
+ 	if (_curFront) {
+ 		if (precise) {
+@@ -1329,6 +1331,7 @@
+ 	m.pre = pre;
+ 	m.underSeq = underSeq; m.underSlot = underSlot; m.underCode = underCode;
+ 	m.seq = c.seq;
++	m.sourceX = sourceX; m.sourceY = sourceY;
+ 	m.slot = _recordSlot;
+ 	m.val = *dest;
+ 	m.code = 0;
+@@ -1343,6 +1346,43 @@
+ 		}
+ 	}
+ 	_celMain.any = true;
++}
++
++void DigHD::finishCel() {
++	if (_vm->_game.id != GID_DIG || _recordSlot < 0 || !_celMain.any ||
++	    _curScaleX <= 0 || _curScaleY <= 0 || (_curScaleX == 255 && _curScaleY == 255))
++		return;
++	CelSlot &c = _cels[_recordSlot];
++	if (!c.soft || !c.image || !c.precise)
++		return;
++	const VirtScreen &vs = _vm->_virtscr[kMainVirtScreen];
++	const int shift = vs.xstart & 7;
++	const int x0 = MAX(0, c.rx - vs.xstart + shift), x1 = MIN(_celMain.pitch, c.rx - vs.xstart + shift + c.rw);
++	const int y0 = MAX(0, c.ry), y1 = MIN(vs.h + 8, c.ry + c.rh);
++	const float sx = _curScaleX / 255.0f, sy = _curScaleY / 255.0f;
++	double ox = 0, oy = 0; uint count = 0;
++	for (int y = y0; y < y1; y++)
++		for (int x = x0; x < x1; x++) {
++			const CelMark &m = _celMain.mark[(size_t)y * _celMain.pitch + x];
++			if (m.seq != c.seq || m.slot != _recordSlot || m.sourceX < 0 || m.sourceY < 0 ||
++			    m.sourceX >= c.image->idx.w || m.sourceY >= c.image->idx.h)
++				continue;
++			const int u = c.mirror ? c.image->idx.w - 1 - m.sourceX : m.sourceX;
++			ox += x - shift + vs.xstart + .5 - (u + .5) * sx;
++			oy += y + .5 - (m.sourceY + .5) * sy;
++			count++;
++		}
++	if (count < 4)
++		return;
++	// Every part uses the actor's scale. Rounded cel bounds differ by a
++	// whole source pixel for small heads and must not stretch each part.
++	// The final source writes locate its continuous origin through the
++	// original scale table, including the source column overwritten last.
++	c.actorScale = true; c.scaleX = sx; c.scaleY = sy;
++	c.originX = ox / count; c.originY = oy / count;
++	scheduleSoft(c);
++	if (_debugSoft)
++		debug("DigHD: actor scale costume %d cel %d: %.5f,%.5f origin %.3f,%.3f from %u final writes", c.costume, c.cel, sx, sy, c.originX, c.originY, count);
+ }
+ 
+ void DigHD::CelLayer::clear() {
+@@ -1533,6 +1573,14 @@
+ 		return false;
+ 	const VirtScreen &vs = _vm->_virtscr[kMainVirtScreen];
+ 	const int iw = c.image->idx.w, ih = c.image->idx.h;
++	if (c.actorScale) {
++		r = Common::Rect((int)floorf(c.originX - c.image->padX * c.scaleX) - vs.xstart - 1,
++		                 (int)floorf(c.originY - c.image->padY * c.scaleY) - _vm->_screenTop + vs.topline - 1,
++		                 (int)ceilf(c.originX + (iw + c.image->padX) * c.scaleX) - vs.xstart + 1,
++		                 (int)ceilf(c.originY + (ih + c.image->padY) * c.scaleY) - _vm->_screenTop + vs.topline + 1);
++		r.clip(Common::Rect(0, 0, _w, _h));
++		return !r.isEmpty();
++	}
+ 	// The margin in room pixels at the cel's size, and one more for the filter
+ 	const int px = (c.image->padX * c.rw + iw - 1) / iw + 1;
+ 	const int py = (c.image->padY * c.rh + ih - 1) / ih + 1;
+@@ -1652,7 +1700,7 @@
+ 		softGain(c);
+ 		const Image &im = *c.image;
+ 		const int iw = im.idx.w, ih = im.idx.h, W = im.hd.w, H = im.hd.h;
+-		const bool scaled = c.rw != iw || c.rh != ih;
++		const bool scaled = c.actorScale || c.rw != iw || c.rh != ih;
+ 		const float fx = (float)iw / c.rw, fy = (float)ih / c.rh;
+ 		const int zbuf = (maskBase && _vm->_gdi && c.zbuf > 0 && c.zbuf < _vm->_gdi->_numZBuffer) ? c.zbuf : 0;
+ 		const int zOff = zbuf ? _vm->_gdi->_imgBufOffs[zbuf] : 0;
+@@ -1731,11 +1779,11 @@
+ 							pa = a * 255;
+ 						} else {
+ 							// The cel is drawn smaller or larger: bilinear filter
+-							float u = (hx + 0.5f) * fx - 0.5f;
++							float u = c.actorScale ? ((rx + (dx + .5f) / n - c.originX) / c.scaleX) * n - .5f : (hx + .5f) * fx - .5f;
+ 							if (c.mirror)
+ 								u = iw * n - 1 - u;
+ 							u += im.padX * n;
+-							const float v = (hy + 0.5f) * fy - 0.5f + im.padY * n;
++							const float v = (c.actorScale ? ((vy + (dy + .5f) / n - c.originY) / c.scaleY) * n - .5f : (hy + .5f) * fy - .5f) + im.padY * n;
+ 							const int u0 = (int)floorf(u), v0 = (int)floorf(v);
+ 							const float au = u - u0, av = v - v0;
+ 							float acc[4] = { 0, 0, 0, 0 };
+--- a/engines/scumm/dighd.h
++++ b/engines/scumm/dighd.h
+@@ -190,7 +190,9 @@
+ 	 * An actor is about to be drawn (costume renderer), into the front buffer or
+ 	 * the back buffer. zbuf: the z-plane mask the renderer uses (0 = none).
+ 	 */
+-	void beginActor(int actor, int costume, bool front, int zbuf);
++	void beginActor(int actor, int costume, bool front, int zbuf, int scaleX = 255, int scaleY = 255);
++	/** Finalise a Byle cel after all scale-table writes, before another cel covers it. */
++	void finishCel();
+ 	/**
+ 	 * A costume cel was painted. Coordinates are in costume renderer space.
+ 	 * raw: the cel's codes were drawn as palette indices, without the actor
+@@ -266,6 +268,8 @@
+ 		bool used = false;
+ 		int costume = 0, cel = 0;
+ 		Image *image = nullptr;
++		bool actorScale = false;
++		float originX = 0, originY = 0, scaleX = 1, scaleY = 1;
+ 		int rx = 0, ry = 0, rw = 0, rh = 0;  // on-screen rect in room coordinates
+ 		bool mirror = false;
+ 		bool missing = false;  // drawn, but there is no HD image for this cel
+@@ -293,6 +297,7 @@
+ 		uint32 seq;   // CelSlot::seq of the drawing, 0 = none
+ 		uint16 slot;  // index in _cels
+ 		byte val;     // palette index the cel left in the pixel
++		int16 sourceX, sourceY; // final decoder source coordinate, even after downscale overwrites
+ 		byte code;    // exact original image code when CelSlot::precise is true
+ 		bool paletteMask; // decoder actually applied a shadow-table lookup
+ 		byte pre;     // colour before this mask (or the first stacked mask)
+@@ -510,6 +515,7 @@
+ 	CelSlot _cels[kMaxCelSlots];
+ 	CelLayer _celMain;
+ 	int _curActor = -1, _curCostume = -1, _curCelCount = 0, _curZbuf = 0;
++	int _curScaleX = 255, _curScaleY = 255;
+ 	bool _passStarted = false;
+ 	int _recordSlot = -1;   // cel currently captured by the Byle RLE decoder
+ 	bool _curFront = true;  // the actor is drawn into the front buffer (the screen)
+--- a/engines/scumm/base-costume.cpp
++++ b/engines/scumm/base-costume.cpp
+@@ -37,7 +37,7 @@
+ 
+ 	// AKOS (The Dig) and classic costumes (Sam & Max)
+ 	if (_vm->_digHD)
+-		_vm->_digHD->beginActor(a->_number, a->_costume, !drawToBackBuf, _zbuf);
++		_vm->_digHD->beginActor(a->_number, a->_costume, !drawToBackBuf, _zbuf, _scaleX, _scaleY);
+ 
+ 	_out = vs;
+ 	if (drawToBackBuf)
+--- a/engines/scumm/akos.cpp
++++ b/engines/scumm/akos.cpp
+@@ -644,6 +644,8 @@
+ 		                     !_drawActorToRight, _vm->_virtscr[kMainVirtScreen].xstart, false, true, _shadowMode);
+ 
+ 	byleRLEDecode(compData, _actorHitX, _actorHitY, _actorHitMode ? &_actorHitResult : nullptr, _xmap);
++	if (_vm->_digHD && !_actorHitMode)
++		_vm->_digHD->finishCel();
+ 
+ 	return drawFlag;
+ }
