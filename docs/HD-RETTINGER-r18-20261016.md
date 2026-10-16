@@ -35,3 +35,9 @@ Indeksverdier, objektrektangler, aktørposisjoner, manus og animasjonstiming beh
 Ekstra native kontroll av38/47/48/188 (4000 oppdateringer hver,172 nytegningskontroller uten avvik) fant en løs hudfarget atlasrest over Maggies talehode.895 hoderuter er renset for små frakoblede alfakomponenter. Alle RGB-verdier og gjenværende alfapiksler er identiske; ansikt og hår flyttes ikke. Figurkontaktkontrollen er kjørt på nytt med1511 poseringer uten flagg. Full normal tram-innstigning er fortsatt ikke testet ferdig: knapp859 virket, men et tidlig innstigningsklikk traff ingen inngang mens trammen var underveis.
 
 Hele figurregresjonen er også gjentatt etter atlasoppryddingen på den integrerte leveransemappen:77 tilfeller og656 nytegningskontroller, null avvik.
+
+## Alle navngitte figurkostymer
+
+Alle60 navngitte menneske-/romdraktkostymer er inventarisert.52 gir2422 sammensatte poseringer. Én beregnet kombinasjon i137 er allerede44,56 originalpiksler fra hverandre i originalen; tvungen native kontroll viser samme løse ekstrahode i både original og HD. Det er ikke en ny HD-halsforskyvning. Kontrollverktøyet rapporterer slike kildepar separat, i stedet for å flytte originalens animasjonsdeler for å få et falskt treff. Ingen nye avstands-/kontaktavvik er flagget i de øvrige kildebaserte parene.
+
+De resterende åtte kostymene har ingen målbar separat hode-/kroppskombinasjon. De er registrert som hele figurer, med representative utsnitt for68,173,72,69,37,70,221 og8. Dette er automatisk kilde-/registreringskontroll og et visuelt utvalg, ikke en full visuell godkjenning av hvert animasjonsbilde. Kontaktark og datarapport ligger i grafikkgrenen.
