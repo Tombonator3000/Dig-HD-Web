@@ -29,3 +29,9 @@ Indeksverdier, objektrektangler, aktørposisjoner, manus og animasjonstiming beh
 - Geometrisk kontroll:1511 sammensatte poseringer for17 relevante figurkostymer, inkludert tale- og handlingslag. Ingen flagget halsavstand eller for smal kontakt. Det er ikke en automatisk godkjenning av stil eller alle faktiske overganger.
 - En første test traff en sporadisk avslutningsfeil i den gamle motoren etter ferdig frame220. Ny kontroll alene og de senere komplette sammenligningskjøringene avsluttet normalt. Testkjøringene bruker nå også separate XDG-mapper. Det påstås ikke at årsaken til den gamle avslutningsfeilen er funnet.
 - Full gjennomspilling, alle overganger i normal spillrekkefølge, visuell godkjenning og prøving av en ny pakket AppImage gjenstår. Lokale kandidattester er ikke en pakketest.
+
+## Avsluttende atlasopprydding
+
+Ekstra native kontroll av38/47/48/188 (4000 oppdateringer hver,172 nytegningskontroller uten avvik) fant en løs hudfarget atlasrest over Maggies talehode.895 hoderuter er renset for små frakoblede alfakomponenter. Alle RGB-verdier og gjenværende alfapiksler er identiske; ansikt og hår flyttes ikke. Figurkontaktkontrollen er kjørt på nytt med1511 poseringer uten flagg. Full normal tram-innstigning er fortsatt ikke testet ferdig: knapp859 virket, men et tidlig innstigningsklikk traff ingen inngang mens trammen var underveis.
+
+Hele figurregresjonen er også gjentatt etter atlasoppryddingen på den integrerte leveransemappen:77 tilfeller og656 nytegningskontroller, null avvik.
