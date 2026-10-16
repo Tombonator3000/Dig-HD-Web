@@ -1,4 +1,8 @@
-# Motortester uten spillfiler
+# Motortester
+
+## Gjennomsiktige lag med private spillfiler
+
+`test-hd-overlays.py` bruker ekte spilldata og en kopiert PDA-lagring. Den kontrollerer eksakt nearest-visning og at inventaret ikke preger originaltekstur inn i et konstant HD-bilde. Kommando og avgrensning står i [HD-RETTINGER-20261016](../../docs/HD-RETTINGER-20261016.md). Denne integrasjonstesten kjøres manuelt når private data er tilgjengelige.
 
 ## Komprimert video
 
@@ -27,6 +31,4 @@ stabilt minnebruk etter oppvarming, mappeindekser, manglende filer, omdirigering
 normalisering og nytt forsøk etter feil. Den krever ingen nettleser eller nøkkel.
 Lagring i IndexedDB, brukerinput og ytelse på mobil krever egen kontroll.
 
-## HD-skyggelag med private spillfiler
-
-`test-hd-overlays.py` er samme regresjon som i Dig-HD-Remake. Den bruker egen mod, spilldata og kopi av PDA-lagring. Se `docs/HD-RETTINGER-20261016.md`. Registreringsverktøyet og pipelinen omtalt der ligger i hovedrepoet Dig-HD-Remake.
+`test-character-scale.py` sammenligner en ferdig kompilert kandidat med en tidligere motor ved tre aktørstørrelser, begge sidevendte retninger og Boston/Brink/Maggie. Krever private spill-/modfiler og en kopi av en lagring fra moon map (rom65). Alle lagringer, innstillinger, XDG-mapper og skjermbilder skrives under `--out`. Se `--help`. Ingen grafikkfixturer lagres i kodegrenen.
