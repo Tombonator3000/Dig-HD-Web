@@ -304,3 +304,24 @@ test('speculative failures stay quiet and requested files can still retry', asyn
   assert.equal(await (await source.read(rows[1].path)).text(), rows[1].sha);
   assert.equal(requests.filter(sha => sha === rows[1].sha).length, 2);
 });
+
+test('compressed SAN replacements work in local folders and remote indexes', async () => {
+  const files = ['mod.json', 'rooms/room022.png', 'san/SQ1.ivf', 'san/SQ1/00001.png',
+    'san/../SQ2.ivf', 'san/SQ1.mp4', 'san/SQ1.ivf.exe', 'san/SQ1/other.ivf'];
+  const rows = selectFiles(files.map(name => file('gpt/' + name)), 'mod');
+  assert.deepEqual(rows.map(row => row.path), files.slice(0, 4).map(name => MOD_ROOT + name));
+  const remote = treeRows(files.map(path => ({path, type: 'blob', size: 6, sha: path})), '', 'mod');
+  assert.deepEqual(remote.map(row => row.path), rows.map(row => row.path));
+  const indexes = makeIndexes(remote);
+  assert.deepEqual(indexes.get(MOD_ROOT + 'san/index.json'), {'SQ1.ivf': 6, SQ1: {}});
+  const requests = [];
+  const source = new RemoteSource(memoryLibrary(), 'KEY', async url => {
+    requests.push(String(url)); return new Response('movie!');
+  });
+  source.rows = new Map(remote.map(row => [row.path, row]));
+  const fetch = privateFetch(source, indexes, new URL('https://example.org/game/'),
+    async () => { throw new Error('Unexpected public file request'); });
+  assert.equal(await (await fetch(MOD_ROOT + 'san/SQ1.ivf')).text(), 'movie!');
+  assert.equal(await (await fetch(MOD_ROOT + 'san/SQ1.ivf')).text(), 'movie!');
+  assert.equal(requests.length, 1);
+});
