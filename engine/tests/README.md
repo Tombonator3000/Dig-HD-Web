@@ -26,3 +26,7 @@ testbro for nettverkskall. Den prøver 90 000 oppslag i en mappe med 30 000 file
 stabilt minnebruk etter oppvarming, mappeindekser, manglende filer, omdirigering,
 normalisering og nytt forsøk etter feil. Den krever ingen nettleser eller nøkkel.
 Lagring i IndexedDB, brukerinput og ytelse på mobil krever egen kontroll.
+
+## HD-skyggelag med private spillfiler
+
+`test-hd-overlays.py` er samme regresjon som i Dig-HD-Remake. Den bruker egen mod, spilldata og kopi av PDA-lagring. Se `docs/HD-RETTINGER-20261016.md`. Registreringsverktøyet og pipelinen omtalt der ligger i hovedrepoet Dig-HD-Remake.
