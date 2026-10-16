@@ -9,7 +9,7 @@
 # samme Emscripten-versjon, configure med --host=wasm32-unknown-emscripten, make og
 # make dist-emscripten. Bare SCUMM-motoren, som i engine/build.sh.
 #
-# Krever: git, make, python3, pkg-config, tar, xz og zip. Emscripten (emsdk) installeres i
+# Krever: git, make, python3, pkg-config, curl, tar, xz og zip. Emscripten (emsdk) installeres i
 # engine/emsdk første gang (omtrent 350 MB). ScummVM sin configure bruker pkg-config for SDL3,
 # og make dist-emscripten bruker zip.
 #
@@ -55,20 +55,58 @@ if [ "$(cat "$EMSDK_DIR/.dighd-versjon" 2>/dev/null || true)" != "$EMSDK_VERSION
 fi
 # shellcheck disable=SC1091
 EMSDK_QUIET=1 source "$EMSDK_DIR/emsdk_env.sh"
+# 4.0.10 har en skrivefeil i zlib.pc som også når PNG via pkg-config.
+ZLIB_PC="$EMSDK_DIR/upstream/emscripten/cache/sysroot/lib/pkgconfig/zlib.pc"
+if [ -f "$ZLIB_PC" ] && grep -q -- '-sUSE_ZIB' "$ZLIB_PC"; then
+	sed -i 's/-sUSE_ZIB/-sUSE_ZLIB=1/g' "$ZLIB_PC"
+fi
+# Verts-PC-ens biblioteker (blant annet fra conda) må ikke brukes til WebAssembly.
+export PKG_CONFIG_PATH=""
 
-# 3. Konfigurer og bygg
+# 3. VP8-dekoder: libvpx har ingen Emscripten-port. Bygg den låste kilden som
+# ScummVM sin egen oppskrift bruker. Ingen videokodere eller pthreads i nettleseren.
+VPX_VERSION=1.15.0
+WEB_LIBS="${DIGHD_WEB_LIBS:-$HERE/emsdk-libs}"
+mkdir -p "$WEB_LIBS"
+WEB_LIBS="$(cd "$WEB_LIBS" && pwd)"
+VPX_PREFIX="$WEB_LIBS/vpx-$VPX_VERSION-$EMSDK_VERSION"
+if [ ! -f "$VPX_PREFIX/lib/libvpx.a" ]; then
+	ARCHIVE="$WEB_LIBS/libvpx-$VPX_VERSION.tar.gz"
+	if [ ! -f "$ARCHIVE" ]; then
+		curl --fail --location --retry 3 "https://codeload.github.com/webmproject/libvpx/tar.gz/refs/tags/v$VPX_VERSION" -o "$ARCHIVE.tmp"
+		mv "$ARCHIVE.tmp" "$ARCHIVE"
+	fi
+	echo "e935eded7d81631a538bfae703fd1e293aad1c7fd3407ba00440c95105d2011e  $ARCHIVE" | sha256sum -c -
+	tar -xzf "$ARCHIVE" -C "$WEB_LIBS"
+	(
+		cd "$WEB_LIBS/libvpx-$VPX_VERSION"
+		emconfigure ./configure --target=generic-gnu --prefix="$VPX_PREFIX" \
+			--disable-vp8-encoder --disable-vp9-encoder --disable-multithread \
+			--disable-runtime-cpu-detect --disable-examples --disable-tools \
+			--disable-docs --disable-unit-tests
+		emmake make -j"$JOBS"
+		emmake make install
+		cp LICENSE "$VPX_PREFIX/LICENSE"
+	) > "$WEB_LIBS/vpx-build.log" 2>&1 || { tail -30 "$WEB_LIBS/vpx-build.log"; exit 1; }
+fi
+
+# 4. Konfigurer og bygg
 cd "$SRC"
-if [ ! -f config.mk ] || [ "${RECONFIGURE:-0}" = "1" ]; then
+CONFIG_ID="$(cat "$HERE/SCUMMVM_COMMIT" "$HERE"/patches/*.patch "$HERE/build-web.sh" | sha256sum | cut -d' ' -f1)-$EMSDK_VERSION"
+if [ ! -f config.mk ] || [ "$(cat .dighd-config 2>/dev/null || true)" != "$CONFIG_ID" ] || [ "${RECONFIGURE:-0}" = "1" ]; then
 	echo "Konfigurerer for nettleseren (bare SCUMM-motoren) ..."
-	# Emscripten slår av valgfrie biblioteker som ikke er slått på; DigHD trenger PNG og zlib.
+	# Vorbis/Ogg brukes også av ScummVM sin eksisterende MKV-dekoder under USE_VPX.
 	emconfigure ./configure --host=wasm32-unknown-emscripten --build=wasm32-unknown-emscripten \
 		--disable-all-engines --enable-engine=scumm,scumm-7-8 \
 		--disable-engine=he,rebel2-psx --disable-detection-full \
 		--disable-debug --enable-optimizations \
-		--enable-png --enable-zlib \
+		--enable-png --enable-zlib --enable-vpx --with-vpx-prefix="$VPX_PREFIX" \
+		--enable-vorbis --enable-ogg \
 		--disable-mt32emu --disable-fluidsynth --disable-cloud --disable-libcurl \
 		--disable-sdlnet --disable-tts --disable-eventrecorder > configure.log 2>&1 \
 		|| { tail -30 configure.log; echo "Konfigureringen feilet, se $SRC/configure.log"; exit 1; }
+	grep -q '^USE_VPX=1' config.mk || { echo "VP8-støtte mangler i nettleserbygget"; exit 1; }
+	echo "$CONFIG_ID" > .dighd-config
 	rm -f scummvm-conf.*
 fi
 
@@ -76,4 +114,5 @@ echo "Bygger med $JOBS tråder (første gang tar det noen minutter) ..."
 emmake make -j"$JOBS" > build.log 2>&1 || { tail -30 build.log; echo "Bygging feilet, se $SRC/build.log"; exit 1; }
 rm -rf build-emscripten
 emmake make dist-emscripten >> build.log 2>&1 || { tail -30 build.log; echo "Pakkingen feilet, se $SRC/build.log"; exit 1; }
+cp "$VPX_PREFIX/LICENSE" build-emscripten/doc/libvpx-LICENSE.txt
 echo "Ferdig: $SRC/build-emscripten"

@@ -24,13 +24,14 @@ jobs:
           node --test engine/pages/tests/*.test.mjs
           python3 engine/tests/test-build-pages.py -v
       - name: Byggepakker
-        run: sudo apt-get update && sudo apt-get install -y pkg-config zip xz-utils
+        run: sudo apt-get update && sudo apt-get install -y pkg-config zip xz-utils curl ffmpeg
       - name: Bygg ScummVM med DigHD
         run: JOBS=2 engine/build-web.sh
       - name: Kontroller store filmapper og minnebruk
         run: |
           EMSDK_QUIET=1 source engine/emsdk/emsdk_env.sh
           engine/tests/test-http-fs-cache.sh engine/scummvm-web
+          engine/tests/test-hd-video.sh engine/scummvm-web
       - name: Pakk bare motor, temaer og kildekode
         run: python3 engine/build-pages.py
       - uses: actions/upload-pages-artifact@v4

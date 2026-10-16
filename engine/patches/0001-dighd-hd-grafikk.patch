@@ -491,6 +491,18 @@ index 7f288d7b..79a52ab6 100644
  public:
  	CharsetRendererClassic(ScummEngine *vm, int cjkSpacing) : CharsetRendererPC(vm), _width(0), _height(0), _origWidth(0), _origHeight(0),
  		_cjkSpacing(cjkSpacing), _offsX(0), _offsY(0), _charPtr(nullptr), _drawScreen(kMainVirtScreen) {}
+diff --git a/engines/scumm/configure.engine b/engines/scumm/configure.engine
+index 0f0c80de..399cbc54 100644
+--- a/engines/scumm/configure.engine
++++ b/engines/scumm/configure.engine
+@@ -1,6 +1,6 @@
+ # This file is included from the main "configure" script
+ # add_engine [name] [desc] [build-by-default] [subengines] [base games] [deps] [components]
+-add_engine scumm "SCUMM" yes "scumm_7_8 he rebel2_psx" "v0-v6 games" "" "midi fmtowns_pc98_audio sid_audio imgui"
++add_engine scumm "SCUMM" yes "scumm_7_8 he rebel2_psx" "v0-v6 games" "" "midi fmtowns_pc98_audio sid_audio imgui vpx"
+ add_engine scumm_7_8 "v7 & v8 games" yes
+ add_engine he "HE71+ games" yes "" "" "highres bink" "enet"
+ add_engine rebel2_psx "Rebel Assault II PlayStation" no "" "" "16bit 3d tinygl"
 diff --git a/engines/scumm/costume.cpp b/engines/scumm/costume.cpp
 index aab00a03..d7b0704e 100644
 --- a/engines/scumm/costume.cpp
@@ -611,10 +623,10 @@ index 21938706..17d0c967 100644
  	width *= 8;
 diff --git a/engines/scumm/dighd.cpp b/engines/scumm/dighd.cpp
 new file mode 100644
-index 00000000..fce9ef41
+index 00000000..b576f1ea
 --- /dev/null
 +++ b/engines/scumm/dighd.cpp
-@@ -0,0 +1,5232 @@
+@@ -0,0 +1,5408 @@
 +/* ScummVM - Graphic Adventure Engine
 + *
 + * ScummVM is the legal property of its developers, whose names
@@ -657,6 +669,7 @@ index 00000000..fce9ef41
 +
 +#include "scumm/actor.h"
 +#include "scumm/dighd.h"
++#include "scumm/dighd_video.h"
 +#include "scumm/gfx.h"
 +#include "scumm/object.h"
 +#include "scumm/scumm.h"
@@ -790,6 +803,7 @@ index 00000000..fce9ef41
 +	opacity.clear();
 +	transparent = -1;
 +	soft = false;
++	softEdge = false;
 +	padX = padY = 0;
 +	nearCycle.clear();
 +	nearCycleGen = 0;
@@ -1020,7 +1034,7 @@ index 00000000..fce9ef41
 +	}
 +	_cursorImage.free();
 +	clearRoom();
-+	_smushFrame.free();
++	endSmush();
 +}
 +
 +bool DigHD::initGraphics(int width, int height) {
@@ -1206,6 +1220,20 @@ index 00000000..fce9ef41
 +	out.hd.copyFrom(*conv);
 +	conv->free();
 +	delete conv;
++	if (!pad) {
++		// Soft alpha values (not only 0 and 255): the edge is drawn soft over the HD room
++		for (int yy = 0; yy < out.hd.h && !out.softEdge; yy++) {
++			const uint32 *row = (const uint32 *)out.hd.getBasePtr(0, yy);
++			for (int xx = 0; xx < out.hd.w; xx++) {
++				byte a, r, g, b;
++				_rgba.colorToARGB(row[xx], a, r, g, b);
++				if (a && a != 255) {
++					out.softEdge = true;
++					break;
++				}
++			}
++		}
++	}
 +	return true;
 +}
 +
@@ -1603,6 +1631,112 @@ index 00000000..fce9ef41
 +	}
 +	for (int ch = 0; ch < 3; ch++)
 +		gain[ch] = base[ch] ? MIN<uint32>(512, shown[ch] * 256 / base[ch]) : 256;
++}
++
++// Room objects are built per original pixel: an object pixel shows the object's
++// HD block, a background pixel the room's. With the original's hard mask the
++// edge of a painted object becomes 4 x 4 steps (the car in room 9, Tom 15
++// October 2026). An object image with soft alpha (softEdge) is blended here:
++// inside the object, the HD room under it shows through where the alpha is
++// below full; on background pixels next to the object, the object's HD pixels
++// are laid over the room with their alpha. Only room and object pixels are
++// touched, so figures, text and other objects in front stay as they are.
++void DigHD::drawSoftObjectEdges(int x, int y, int width, int height) {
++	if (!_roomImage.valid())
++		return;
++	int soft[256], nSoft = 0;
++	for (uint i = 0; i < _drawn.size() && nSoft < 256; i++)
++		if (_drawn[i].image && !_drawn[i].blast && _drawn[i].image->softEdge)
++			soft[nSoft++] = i;
++	if (!nSoft)
++		return;
++	const int n = _scale, bpp = _fmt.bytesPerPixel, pitch = width * n * bpp;
++	const Image &room = _roomImage;
++	const int roomW = room.idx.w, roomH = room.idx.h;
++	auto blend = [&](byte *out, uint32 top, int topGain[3], const uint32 *under, int underGain[3]) {
++		byte a, r, g, b;
++		_rgba.colorToARGB(top, a, r, g, b);
++		const uint32 dst = bpp == 4 ? READ_UINT32(out) : READ_UINT16(out);
++		byte dr, dg, db;
++		if (under) {
++			byte ua;
++			_rgba.colorToARGB(*under, ua, dr, dg, db);
++			dr = MIN(255, dr * underGain[0] >> 8);
++			dg = MIN(255, dg * underGain[1] >> 8);
++			db = MIN(255, db * underGain[2] >> 8);
++			// The object's own (already tinted) colour is what the block holds
++			_fmt.colorToRGB(dst, r, g, b);
++		} else {
++			_fmt.colorToRGB(dst, dr, dg, db);
++			r = MIN(255, r * topGain[0] >> 8);
++			g = MIN(255, g * topGain[1] >> 8);
++			b = MIN(255, b * topGain[2] >> 8);
++		}
++		const uint32 col = _fmt.RGBToColor((r * a + dr * (255 - a) + 127) / 255, (g * a + dg * (255 - a) + 127) / 255,
++		                                  (b * a + db * (255 - a) + 127) / 255);
++		if (bpp == 4) WRITE_UINT32(out, col); else WRITE_UINT16(out, col);
++	};
++	for (int k = 0; k < nSoft; k++) {
++		const int slot = soft[k];
++		const DrawnObject &d = _drawn[slot];
++		const Image &im = *d.image;
++		int gain[3];
++		objectPaletteGain(im.idx, im.transparent, im.basePal, _pal, gain);
++		for (int r = 0; r < height; r++) {
++			const int sy = y + r;
++			for (int c = 0; c < width; c++) {
++				const int sx = x + c;
++				const uint32 src = _source[sy * _w + sx];
++				const uint32 kind = src & kSrcMask;
++				if (_cycleArea[sy * _w + sx] || _text[sy * _w + sx] || _softBase[sy * _w + sx] ||
++				    _shade[sy * _w + sx] || _softBlastRef[sy * _w + sx])
++					continue;
++				int ox, oy, rx, ry;
++				bool own;
++				if (kind == kSrcObject && (int)((src >> 22) & 0xFF) == slot) {
++					ox = src & 0x7FF;
++					oy = (src >> 11) & 0x7FF;
++					rx = d.x + ox;
++					ry = d.y + oy;
++					own = true;
++				} else if (kind == kSrcRoom) {
++					rx = src & 0x7FFF;
++					ry = (src >> 15) & 0x7FFF;
++					ox = rx - d.x;
++					oy = ry - d.y;
++					if (ox < 0 || oy < 0 || ox >= im.idx.w || oy >= im.idx.h || im.visibleAt(ox, oy))
++						continue;
++					// Only next to a pixel the object shows now (not a removed state)
++					bool next = false;
++					for (int ny = MAX(sy - 1, 0); ny <= MIN(sy + 1, _h - 1) && !next; ny++)
++						for (int nx = MAX(sx - 1, 0); nx <= MIN(sx + 1, _w - 1) && !next; nx++) {
++							const uint32 s2 = _source[ny * _w + nx];
++							next = (s2 & kSrcMask) == kSrcObject && (int)((s2 >> 22) & 0xFF) == slot;
++						}
++					if (!next)
++						continue;
++					own = false;
++				} else {
++					continue;
++				}
++				if (rx < 0 || ry < 0 || rx >= roomW || ry >= roomH)
++					continue;
++				byte *out = _outBuf.data() + (r * n) * pitch + (c * n) * bpp;
++				for (int dy = 0; dy < n; dy++) {
++					const uint32 *top = (const uint32 *)im.hd.getBasePtr(ox * n, oy * n + dy);
++					const uint32 *under = (const uint32 *)room.hd.getBasePtr(rx * n, ry * n + dy);
++					byte *o = out + dy * pitch;
++					for (int dx = 0; dx < n; dx++, o += bpp) {
++						byte a, rr, gg, bb;
++						_rgba.colorToARGB(top[dx], a, rr, gg, bb);
++						if (own ? a == 255 : a == 0)
++							continue;
++						blend(o, top[dx], gain, own ? under + dx : nullptr, gain);
++					}
++				}
++			}
++		}
++	}
 +}
 +
 +void DigHD::drawSoftBlasts(int x, int y, int width, int height) {
@@ -2626,6 +2760,17 @@ index 00000000..fce9ef41
 +	writeRect(x, y, width, height);
 +}
 +
++void DigHD::endSmush() {
++#ifdef USE_VPX
++	delete _smushVideo;
++	_smushVideo = nullptr;
++#endif
++	_smushVideoTried = false;
++	_smushFile.clear();
++	_smushLoaded = false;
++	_smushFrame.free();
++}
++
 +void DigHD::blitSmush(const byte *src, int pitch, int width, int height, const Common::String &file, int frame) {
 +	Common::String name = file;
 +	int slash = name.findLastOf('/');
@@ -2636,6 +2781,7 @@ index 00000000..fce9ef41
 +		name = name.substr(0, dot);
 +	name.toUppercase();
 +	if (name != _smushFile) {
++		endSmush();
 +		_smushFile = name;
 +		debug("DigHD: film %s", name.c_str());
 +	}
@@ -2645,7 +2791,8 @@ index 00000000..fce9ef41
 +	// (verified against thedig-textures output with DIGHD_VERIFY).
 +	_smushFrameNo = frame - 1;
 +	Common::FSNode node(_modPath.join(Common::String::format("san/%s/%05d.png", name.c_str(), frame - 1)));
-+	const bool haveFrame = node.exists();
++	const bool havePng = node.exists();
++	bool haveFrame = havePng;
 +
 +	// Text drawn into this frame by SmushPlayer (see smushTextEnd). The mask
 +	// has the layout of SmushPlayer's frame buffer, src may start inside it.
@@ -2656,9 +2803,46 @@ index 00000000..fce9ef41
 +			text = _smushText.data() + off;
 +	}
 +
-+	// The HD frame is only read in HD mode; classic mode shows the original anyway
++	// The PNG fallback is only read in HD mode; classic mode shows the original.
 +	_smushLoaded = false;
-+	if (haveFrame && !_classic) {
++	if (!_smushVideoTried) {
++		_smushVideoTried = true;
++		Common::FSNode movie(_modPath.join(Common::String::format("san/%s.ivf", name.c_str())));
++		if (movie.exists()) {
++#ifdef USE_VPX
++			_smushVideo = new DigHDVideo();
++			if (!_smushVideo->open(movie.createReadStream(), _w * _scale, _h * _scale, _fmt)) {
++				warning("DigHD: cannot open HD video %s, using PNG/original", name.c_str());
++				delete _smushVideo;
++				_smushVideo = nullptr;
++			} else {
++				debug("DigHD: compressed video %s, %u frames", name.c_str(), _smushVideo->frameCount());
++			}
++#else
++			warning("DigHD: HD video %s requires libvpx, using PNG/original", name.c_str());
++#endif
++		}
++	}
++#ifdef USE_VPX
++	// Decode by original frame number, also in classic mode so switching back
++	// never has to catch up with a long classic interval. Repeated blits reuse
++	// the current picture; skipped SAN frames advance the decoder without RGB copies.
++	if (_smushVideo) {
++		const Graphics::Surface *picture = _smushVideo->frame(frame - 1);
++		if (picture) {
++			haveFrame = true;
++			if (!_classic) {
++				_smushFrame.copyFrom(*picture);
++				_smushLoaded = true;
++			}
++		} else {
++			warning("DigHD: HD video %s failed at frame %d, using PNG/original", name.c_str(), frame - 1);
++			delete _smushVideo;
++			_smushVideo = nullptr;
++		}
++	}
++#endif
++	if (!_smushLoaded && havePng && !_classic) {
 +		::Image::PNGDecoder dec;
 +		Common::SeekableReadStream *s = node.createReadStream();
 +		if (s && dec.loadStream(*s) && dec.getSurface()->w == _w * _scale && dec.getSurface()->h == _h * _scale) {
@@ -4460,6 +4644,10 @@ index 00000000..fce9ef41
 +		}
 +	}
 +
++	// Soft edges of room objects over the HD room, under the figures
++	if (!flatOnly && !_vm->isSmushActive())
++		drawSoftObjectEdges(x, y, width, height);
++
 +	// Soft cels over the blocks built above, under the text
 +	if (!flatOnly && !_vm->isSmushActive())
 +		drawSoftCels(x, y, width, height);
@@ -5849,10 +6037,10 @@ index 00000000..fce9ef41
 +} // End of namespace Scumm
 diff --git a/engines/scumm/dighd.h b/engines/scumm/dighd.h
 new file mode 100644
-index 00000000..26bc7a8e
+index 00000000..93686ac4
 --- /dev/null
 +++ b/engines/scumm/dighd.h
-@@ -0,0 +1,637 @@
+@@ -0,0 +1,648 @@
 +/* ScummVM - Graphic Adventure Engine
 + *
 + * ScummVM is the legal property of its developers, whose names
@@ -5930,6 +6118,7 @@ index 00000000..26bc7a8e
 +namespace Scumm {
 +
 +class ScummEngine;
++class DigHDVideo;
 +struct VirtScreen;
 +
 +class DigHD {
@@ -5954,6 +6143,8 @@ index 00000000..26bc7a8e
 +	void blit8(const byte *src, int pitch, int x, int y, int width, int height);
 +	/** SMUSH frame blit; uses mods/<name>/san/<FILE>/<frame>.png when present. */
 +	void blitSmush(const byte *src, int pitch, int width, int height, const Common::String &file, int frame);
++	/** Release a compressed replacement at every SAN start/end, including skips. */
++	void endSmush();
 +
 +	/**
 +	 * Text over SMUSH frames (subtitles). SmushPlayer draws text straight into
@@ -6103,6 +6294,9 @@ index 00000000..26bc7a8e
 +		// padY original pixels on each side, and its own alpha (see drawSoftCels())
 +		bool soft = false;
 +		int padX = 0, padY = 0;
++		// A room object image (objNNN_SS.png, no margin) whose alpha has soft
++		// values: its edge is blended over the HD room (drawSoftObjectEdges())
++		bool softEdge = false;
 +		Common::Array<byte> nearCycle;  // per original pixel: cycles or touches a cycled pixel
 +		uint32 nearCycleGen = 0;        // _cycledGen the mask was made for
 +		bool valid() const { return hd.getPixels() && idx.getPixels(); }
@@ -6184,6 +6378,7 @@ index 00000000..26bc7a8e
 +	bool _savedBlasts = false;
 +	Common::Array<uint16> _softBlastRef;  // top soft blast instance per screen pixel
 +	void drawSoftBlasts(int x, int y, int width, int height);
++	void drawSoftObjectEdges(int x, int y, int width, int height);
 +
 +	bool loadImage(const Common::Path &hdFile, const Common::Path &idxFile, int origW, int origH, Image &out, bool pad = false);
 +	void loadRoom(int room);
@@ -6360,6 +6555,10 @@ index 00000000..26bc7a8e
 +
 +	// Smush frame replacement
 +	Common::String _smushFile;
++	bool _smushVideoTried = false;
++#ifdef USE_VPX
++	DigHDVideo *_smushVideo = nullptr;
++#endif
 +	int _smushFrameNo = -1;             // frame shown last, numbered as the files in san/<FILE>/
 +	Graphics::Surface _smushFrame;      // HD frame in screen format, used for kSrcSan pixels
 +	bool _smushLoaded = false;          // _smushFrame belongs to the frame shown last
@@ -6490,6 +6689,163 @@ index 00000000..26bc7a8e
 +} // End of namespace Scumm
 +
 +#endif
+diff --git a/engines/scumm/dighd_video.h b/engines/scumm/dighd_video.h
+new file mode 100644
+index 00000000..345a1090
+--- /dev/null
++++ b/engines/scumm/dighd_video.h
+@@ -0,0 +1,151 @@
++/* ScummVM - Graphic Adventure Engine
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation, either version 3 of the License, or
++ * (at your option) any later version.
++ * This program is distributed WITHOUT ANY WARRANTY. See COPYING for details.
++ */
++
++#ifndef SCUMM_DIGHD_VIDEO_H
++#define SCUMM_DIGHD_VIDEO_H
++
++#ifdef USE_VPX
++#include "common/array.h"
++#include "common/endian.h"
++#include "common/stream.h"
++#include "graphics/surface.h"
++#include "graphics/yuv_to_rgb.h"
++#include <vpx/vpx_decoder.h>
++#include <vpx/vp8dx.h>
++
++namespace Scumm {
++
++// Video-only IVF/VP8 replacement pictures. SAN remains the playback clock and
++// owns sound, subtitles and script events. Timestamp n must describe SAN frame n.
++// Only one decoded picture and one bounded compressed packet are retained.
++class DigHDVideo {
++public:
++	DigHDVideo() = default;
++	~DigHDVideo() {
++		if (_codecReady)
++			vpx_codec_destroy(&_codec);
++		delete _stream;
++		_surface.free();
++	}
++
++	// Takes ownership even on failure. The caller deletes a failed instance.
++	bool open(Common::SeekableReadStream *stream, int width, int height, const Graphics::PixelFormat &format) {
++		_stream = stream;
++		byte header[32];
++		if (!stream || stream->size() < 32 || stream->read(header, sizeof(header)) != sizeof(header))
++			return false;
++		if (READ_BE_UINT32(header) != MKTAG('D', 'K', 'I', 'F') || READ_LE_UINT16(header + 4) != 0 ||
++		    READ_LE_UINT16(header + 6) != 32 || READ_BE_UINT32(header + 8) != MKTAG('V', 'P', '8', '0'))
++			return false;
++		if (READ_LE_UINT16(header + 12) != width || READ_LE_UINT16(header + 14) != height ||
++		    width <= 0 || height <= 0 || (width & 1) || (height & 1) ||
++		    (format.bytesPerPixel != 2 && format.bytesPerPixel != 4))
++			return false;
++		_frames = READ_LE_UINT32(header + 24);
++		const uint32 rate = READ_LE_UINT32(header + 16), scale = READ_LE_UINT32(header + 20);
++		if (!_frames || _frames > 100000 || !rate || !scale || rate > 240000 || scale > 240000)
++			return false;
++		_width = width;
++		_height = height;
++		_format = format;
++		return rewind();
++	}
++
++	const Graphics::Surface *frame(int wanted) {
++		if (_failed || wanted < 0 || (uint32)wanted >= _frames)
++			return nullptr;
++		if (wanted < _frameNo && !rewind())
++			return nullptr;
++		while (_frameNo < wanted) {
++			byte header[12];
++			if (_stream->read(header, sizeof(header)) != sizeof(header))
++				return fail();
++			const uint32 size = READ_LE_UINT32(header);
++			const uint64 stamp = READ_LE_UINT64(header + 4);
++			if (size < 3 || size > 16 * 1024 * 1024 || size > _stream->size() - _stream->pos() ||
++			    stamp != (uint64)(_frameNo + 1))
++				return fail();
++			_packet.resize(size);
++			if (_stream->read(_packet.data(), size) != size || !(_packet[0] & 0x10))
++				return fail();
++			// Bound decoder allocations before accepting a new keyframe size.
++			if (!(_packet[0] & 1)) {
++				vpx_codec_stream_info_t info = {};
++				info.sz = sizeof(info);
++				if (vpx_codec_peek_stream_info(&vpx_codec_vp8_dx_algo, _packet.data(), size, &info) ||
++				    info.w != (uint)_width || info.h != (uint)_height)
++					return fail();
++			} else if (_frameNo < 0) {
++				return fail();
++			}
++			if (vpx_codec_decode(&_codec, _packet.data(), size, nullptr, 0))
++				return fail();
++			vpx_codec_iter_t iter = nullptr;
++			vpx_image_t *image = vpx_codec_get_frame(&_codec, &iter);
++			if (!image || image->fmt != VPX_IMG_FMT_I420 || image->d_w != (uint)_width ||
++			    image->d_h != (uint)_height || image->stride[1] != image->stride[2])
++				return fail();
++			++_frameNo;
++			if (_frameNo == wanted) {
++				if (!_surface.getPixels())
++					_surface.create(_width, _height, _format);
++				YUVToRGBMan.convert420(&_surface, Graphics::YUVToRGBManager::kScaleITU,
++				                      image->planes[0], image->planes[1], image->planes[2],
++				                      _width, _height, image->stride[0], image->stride[1]);
++			}
++			// A one-picture-per-packet stream cannot contain invisible/extra frames.
++			if (vpx_codec_get_frame(&_codec, &iter))
++				return fail();
++		}
++		return &_surface;
++	}
++
++	uint32 frameCount() const { return _frames; }
++
++private:
++	DigHDVideo(const DigHDVideo &) = delete;
++	DigHDVideo &operator=(const DigHDVideo &) = delete;
++	const Graphics::Surface *fail() { _failed = true; return nullptr; }
++	bool rewind() {
++		if (_codecReady) {
++			vpx_codec_destroy(&_codec);
++			_codecReady = false;
++		}
++		_stream->clearErr();
++		if (!_stream->seek(32)) {
++			_failed = true;
++			return false;
++		}
++		vpx_codec_dec_cfg_t config = {};
++		config.w = _width;
++		config.h = _height;
++		config.threads = 2;
++		if (vpx_codec_dec_init(&_codec, &vpx_codec_vp8_dx_algo, &config, 0)) {
++			_failed = true;
++			return false;
++		}
++		_codecReady = true;
++		_failed = false;
++		_frameNo = -1;
++		return true;
++	}
++
++	Common::SeekableReadStream *_stream = nullptr;
++	vpx_codec_ctx_t _codec = {};
++	bool _codecReady = false, _failed = false;
++	uint32 _frames = 0;
++	int _width = 0, _height = 0, _frameNo = -1;
++	Graphics::PixelFormat _format;
++	Graphics::Surface _surface;
++	Common::Array<byte> _packet;
++};
++
++} // namespace Scumm
++#endif // USE_VPX
++#endif // SCUMM_DIGHD_VIDEO_H
 diff --git a/engines/scumm/gfx.cpp b/engines/scumm/gfx.cpp
 index bf85f13c..d9721f39 100644
 --- a/engines/scumm/gfx.cpp
@@ -7274,7 +7630,7 @@ index 0e5aa900..15b08f44 100644
  	friend class InsaneRebel1;
  	friend class InsaneRebel2;
 diff --git a/engines/scumm/smush/smush_player.cpp b/engines/scumm/smush/smush_player.cpp
-index 1c646316..433a8d34 100644
+index 1c646316..e3dbb9ad 100644
 --- a/engines/scumm/smush/smush_player.cpp
 +++ b/engines/scumm/smush/smush_player.cpp
 @@ -32,6 +32,7 @@
@@ -7285,7 +7641,16 @@ index 1c646316..433a8d34 100644
  #include "scumm/imuse_digi/dimuse_engine.h"
  #include "scumm/scumm.h"
  #include "scumm/scumm_v7.h"
-@@ -348,6 +349,8 @@ void SmushPlayer::init(int32 speed) {
+@@ -325,6 +326,8 @@ SmushPlayer::~SmushPlayer() {
+ }
+ 
+ void SmushPlayer::init(int32 speed) {
++	if (_vm->_digHD)
++		_vm->_digHD->endSmush();
+ 	VirtScreen *vs = &_vm->_virtscr[kMainVirtScreen];
+ 
+ 	_frame = 0;
+@@ -348,6 +351,8 @@ void SmushPlayer::init(int32 speed) {
  
  	_vm->setDirtyColors(0, 255);
  	_dst = vs->getPixels(0, 0);
@@ -7294,7 +7659,16 @@ index 1c646316..433a8d34 100644
  
  	// Game-specific per-video init that needs _dst to be set
  	// (e.g. RA2 palette re-push + buffer clear/preserve).
-@@ -758,6 +761,10 @@ void SmushPlayer::handleTextResource(uint32 subType, int32 subSize, Common::Seek
+@@ -376,6 +381,8 @@ bool SmushPlayer::isFastForwardingCurrentFrame() const {
+ }
+ 
+ void SmushPlayer::release() {
++	if (_vm->_digHD)
++		_vm->_digHD->endSmush();
+ 	_vm->_smushVideoShouldFinish = true;
+ 
+ 	for (int i = 0; i < 5; i++) {
+@@ -758,6 +765,10 @@ void SmushPlayer::handleTextResource(uint32 subType, int32 subSize, Common::Seek
  		// changes on the fly will be ignored for Smush texts, since our code design does
  		// not permit it and the feature isn't used anyway).
  
@@ -7305,7 +7679,7 @@ index 1c646316..433a8d34 100644
  		if (flg & kStyleWordWrap) {
  			// COMI has to do it all a bit different, of course. SCUMM7 games immediately render the text from here and actually use the clipping data
  			// provided by the text resource. COMI does not render directly, but enqueues a blast string (which is then drawn through the usual main
-@@ -769,13 +776,24 @@ void SmushPlayer::handleTextResource(uint32 subType, int32 subSize, Common::Seek
+@@ -769,13 +780,24 @@ void SmushPlayer::handleTextResource(uint32 subType, int32 subSize, Common::Seek
  				height = _height - 20;
  			}
  			Common::Rect clipRect(MAX<int>(0, left), MAX<int>(0, top), MIN<int>(left + width, _width), MIN<int>(top + height, _height));
@@ -7330,7 +7704,7 @@ index 1c646316..433a8d34 100644
  	}
  
  	free(string);
-@@ -952,6 +970,10 @@ void SmushPlayer::decodeFrameObject(int codec, const uint8 *src, int left, int t
+@@ -952,6 +974,10 @@ void SmushPlayer::decodeFrameObject(int codec, const uint8 *src, int left, int t
  		}
  	}
  
@@ -7341,7 +7715,7 @@ index 1c646316..433a8d34 100644
  	handleGameFrameObjectDecoded(codec, left, top, width, height);
  
  	if (_storeFrame && !handleGameStoreFrame()) {
-@@ -1339,7 +1361,9 @@ void SmushPlayer::updateScreen() {
+@@ -1339,7 +1365,9 @@ void SmushPlayer::updateScreen() {
  }
  
  void SmushPlayer::handleGameUpdateScreen(const byte *src, int srcPitch, int width, int height) {
@@ -7352,7 +7726,7 @@ index 1c646316..433a8d34 100644
  		_vm->mac_drawBufferToScreen(src, srcPitch, 0, 0, width, height);
  	} else {
  		_vm->_system->copyRectToScreen(src, srcPitch, 0, 0, width, height);
-@@ -1510,7 +1534,10 @@ void SmushPlayer::play(const char *filename, int32 speed, int32 offset, int32 st
+@@ -1510,7 +1538,10 @@ void SmushPlayer::play(const char *filename, int32 speed, int32 offset, int32 st
  			_vm->scummLoop_handleSound();
  
  			if (_warpNeeded) {
@@ -7364,7 +7738,7 @@ index 1c646316..433a8d34 100644
  				_warpNeeded = false;
  			}
  		}
-@@ -1543,6 +1570,8 @@ void SmushPlayer::play(const char *filename, int32 speed, int32 offset, int32 st
+@@ -1543,6 +1574,8 @@ void SmushPlayer::play(const char *filename, int32 speed, int32 offset, int32 st
  					}
  
  					_vm->_system->getPaletteManager()->setPalette(palette + _palDirtyMin * 3, _palDirtyMin, _palDirtyMax - _palDirtyMin + 1);
@@ -7373,7 +7747,7 @@ index 1c646316..433a8d34 100644
  				} else {
  					_vm->_system->getPaletteManager()->setPalette(_pal + _palDirtyMin * 3, _palDirtyMin, _palDirtyMax - _palDirtyMin + 1);
  				}
-@@ -1572,6 +1601,8 @@ void SmushPlayer::play(const char *filename, int32 speed, int32 offset, int32 st
+@@ -1572,6 +1605,8 @@ void SmushPlayer::play(const char *filename, int32 speed, int32 offset, int32 st
  
  					handleGameUpdateScreen(dst, _width, frameWidth, frameHeight);
  

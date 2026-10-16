@@ -1,0 +1,2 @@
+# Diff-kontekst har tilsiktede innledende mellomrom og tomme linjer.
+engine/patches/*.patch -whitespace

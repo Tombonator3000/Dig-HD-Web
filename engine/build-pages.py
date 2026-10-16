@@ -98,7 +98,7 @@ def pack(src: Path, out: Path) -> dict:
     # together with the exact patch, build scripts and this browser frontend.
     tracked = subprocess.check_output(['git', '-C', str(src), 'ls-files', '-z']).decode().split('\0')
     with tarfile.open(out / 'source.tar.gz', 'w:gz') as archive:
-        for name in sorted(set(tracked + ['engines/scumm/dighd.cpp', 'engines/scumm/dighd.h'])):
+        for name in sorted(set(tracked + ['engines/scumm/dighd.cpp', 'engines/scumm/dighd.h', 'engines/scumm/dighd_video.h'])):
             if name and (src / name).is_file():
                 archive.add(src / name, arcname='dig-hd-source/scummvm/' + name, recursive=False)
         for name in ('SCUMMVM_COMMIT', 'build-web.sh', 'build-pages.py'):

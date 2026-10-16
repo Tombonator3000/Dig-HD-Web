@@ -128,7 +128,10 @@ python3 engine/build-pages.py
 ```
 
 ScummVM er låst til engine/SCUMMVM_COMMIT. Emscripten 4.0.10 med Node,
-Clang og SDL3/libpng/zlib-portene hentes til engine/emsdk. Byggeskriptet bruker
+Clang og SDL3/libpng/zlib/Vorbis/Ogg-portene hentes til engine/emsdk.
+VP8-dekoderen libvpx 1.15.0 bygges fra sjekksumkontrollert kilde i
+engine/emsdk-libs. Komprimert intro hentes som `san/SQ1.ivf` fra modden;
+SAN beholder lyd, timing og undertekster. Se [HD-video](HD-VIDEO.md). Byggeskriptet bruker
 ScummVM sin konfigurasjon, bare SCUMM v7/v8 er med, og prosjektets HD-patch
 legges på. Ingen av disse stegene henter spillet eller HD-pakken.
 
